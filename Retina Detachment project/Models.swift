@@ -30,6 +30,39 @@ struct TestSettings: Codable {
     var testMode: TestMode = .standard
     var maxStimuli: Int = 20
     var eccentricityAngles: [Float] = [15, 30, 45, 60, 75, 90] // degrees
+    var polarAngleStep: Float = 45.0  // degrees between polar angles (45° = 8 locations per ring)
+    var repetitionsPerLocation: Int = 3  // How many times to test each location
+
+    /// Generate all test locations based on eccentricity angles and polar angle step
+    func generateTestLocations() -> [TestLocation] {
+        var locations: [TestLocation] = []
+
+        for eccentricity in eccentricityAngles {
+            // Number of polar angles around the circle
+            let numPolarAngles = Int(360.0 / polarAngleStep)
+
+            for i in 0..<numPolarAngles {
+                let polarAngle = Float(i) * polarAngleStep
+                locations.append(TestLocation(eccentricityDeg: eccentricity, polarAngleDeg: polarAngle))
+            }
+        }
+
+        return locations
+    }
+
+    /// Generate full trial list: each location repeated N times, shuffled
+    func generateShuffledTrials() -> [TestLocation] {
+        let baseLocations = generateTestLocations()
+        var allTrials: [TestLocation] = []
+
+        // Repeat each location N times
+        for _ in 0..<repetitionsPerLocation {
+            allTrials.append(contentsOf: baseLocations)
+        }
+
+        // Shuffle to randomize presentation order
+        return allTrials.shuffled()
+    }
 
     // Legacy properties (deprecated, use new names above)
     @available(*, deprecated, renamed: "bowlRadiusMeters")
@@ -70,7 +103,51 @@ enum TestMode: String, CaseIterable, Codable {
     }
 }
 
-// MARK: - Test Data Models
+// MARK: - Test Location Definition
+struct TestLocation: Hashable, Codable {
+    let eccentricityDeg: Float
+    let polarAngleDeg: Float
+}
+
+// MARK: - Trial Record (Comprehensive Data Logging)
+struct TrialRecord: Codable, Identifiable {
+    let id: UUID
+    let trialIndex: Int
+    let eccentricityDeg: Float
+    let polarAngleDeg: Float
+    let onsetTimestamp: Date
+    let seen: Bool
+    let reactionTimeSec: Double?
+    let brightness: Float
+    let bowlRadiusMeters: Float
+
+    init(id: UUID = UUID(), trialIndex: Int, location: TestLocation, onsetTimestamp: Date, seen: Bool, reactionTimeSec: Double?, brightness: Float, bowlRadiusMeters: Float) {
+        self.id = id
+        self.trialIndex = trialIndex
+        self.eccentricityDeg = location.eccentricityDeg
+        self.polarAngleDeg = location.polarAngleDeg
+        self.onsetTimestamp = onsetTimestamp
+        self.seen = seen
+        self.reactionTimeSec = reactionTimeSec
+        self.brightness = brightness
+        self.bowlRadiusMeters = bowlRadiusMeters
+    }
+
+    /// CSV header row
+    static var csvHeader: String {
+        "stimulus_id,trial_index,ecc_deg,pol_deg,onset_timestamp,seen,rt_sec,brightness,bowl_radius_m"
+    }
+
+    /// Convert to CSV row
+    func toCSV() -> String {
+        let iso8601 = ISO8601DateFormatter().string(from: onsetTimestamp)
+        let seenInt = seen ? 1 : 0
+        let rtString = reactionTimeSec.map { String(format: "%.3f", $0) } ?? ""
+        return "\(id.uuidString),\(trialIndex),\(eccentricityDeg),\(polarAngleDeg),\(iso8601),\(seenInt),\(rtString),\(brightness),\(bowlRadiusMeters)"
+    }
+}
+
+// MARK: - Legacy Test Data Models
 struct TestTrial: Codable, Identifiable {
     let id = UUID()
     let timestamp: Date
@@ -79,7 +156,7 @@ struct TestTrial: Codable, Identifiable {
     let reactionTime: Double? // seconds, nil if missed
     let wasDetected: Bool
     let stimulusPosition: SIMD3<Float>
-    
+
     init(angle: Float, eccentricity: Float, position: SIMD3<Float>, reactionTime: Double? = nil, detected: Bool = false) {
         self.timestamp = Date()
         self.stimulusAngle = angle

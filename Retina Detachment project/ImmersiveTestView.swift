@@ -2,6 +2,7 @@ import SwiftUI
 import RealityKit
 import simd
 import QuartzCore
+import UIKit
 
 struct ImmersiveTestView: View {
     @State private var currentStimulus: ModelEntity?
@@ -11,8 +12,19 @@ struct ImmersiveTestView: View {
     @State private var rootEntity: Entity = Entity()
     @State private var inResponseWindow = false
     @State private var currentStimulusID: UUID?  // Track which stimulus is active
+    @State private var currentTrialFinalized = false  // Race-safe: only finalize once
     @State private var stimulusOnsetTime: Double?  // For reaction time
     @State private var lastReactionTimeMs: Double?  // For UI/debug
+
+    // Trial-based testing
+    @State private var trialList: [TestLocation] = []  // Pre-generated, shuffled locations
+    @State private var currentTrialIndex = 0
+    @State private var sessionTrials: [TrialRecord] = []  // Collected trial data
+    @State private var sessionStartTime: Date?
+    @State private var showExportSheet = false
+    @State private var lastExportedURL: URL? = nil
+    @State private var exportStatusText: String? = nil
+
     private let settings = TestSettings.shared
 
     var body: some View {
@@ -76,25 +88,108 @@ struct ImmersiveTestView: View {
                 }
         )
         .overlay(alignment: .topLeading) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Score: \(score)")
-                    .font(.title)
-                    .foregroundColor(.green)
-                Text("Missed: \(missedCount)")
-                    .font(.title)
-                    .foregroundColor(.red)
-                Text("Tap when you see a flash")
-                    .font(.caption)
-                    .foregroundColor(.white)
+            VStack(alignment: .leading, spacing: 12) {
+                // === TRIAL PROGRESS COUNTER (ALWAYS VISIBLE, LARGE) ===
+                VStack(alignment: .leading, spacing: 4) {
+                    if trialList.isEmpty {
+                        Text("Trial: 0 / 0")
+                            .font(.title)
+                            .fontWeight(.bold)
+                            .foregroundColor(.white)
+                    } else if currentTrialIndex >= trialList.count {
+                        // Test complete: show total/total
+                        Text("Trial: \(trialList.count) / \(trialList.count)")
+                            .font(.title)
+                            .fontWeight(.bold)
+                            .foregroundColor(.green)
+                        Text("Complete!")
+                            .font(.headline)
+                            .foregroundColor(.green)
+                    } else {
+                        // Active trial: show (currentTrialIndex + 1) for 1-based counting
+                        let currentTrial = currentTrialIndex + 1
+                        let totalTrials = trialList.count
+                        let remainingTrials = totalTrials - currentTrial
 
+                        Text("Trial: \(currentTrial) / \(totalTrials)")
+                            .font(.title)
+                            .fontWeight(.bold)
+                            .foregroundColor(.white)
+                        Text("Remaining: \(remainingTrials)")
+                            .font(.headline)
+                            .foregroundColor(.gray)
+                    }
+                }
+                .padding(12)
+                .background(.black.opacity(0.8))
+                .cornerRadius(10)
+
+                Divider()
+                    .background(.white.opacity(0.3))
+
+                // Stats
+                Text("Seen: \(score) | Missed: \(missedCount)")
+                    .font(.title3)
+                    .foregroundColor(.white)
                 Text("RT: \(lastReactionTimeMs.map { "\(Int($0)) ms" } ?? "--")")
                     .font(.caption)
                     .foregroundColor(.white)
+
+                if currentTrialIndex >= trialList.count && !trialList.isEmpty {
+                    Divider()
+                        .background(.white.opacity(0.3))
+
+                    Button("Export CSV") {
+                        let url = exportTrialsToCSV()
+                        lastExportedURL = url
+                        exportStatusText = "Saved CSV to:\n\(url.path)"
+                        showExportSheet = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .font(.headline)
+
+                    // Show export status and copy button
+                    if let statusText = exportStatusText {
+                        Text(statusText)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.green)
+                            .padding(.top, 8)
+
+                        Button("Copy Path") {
+                            if let url = lastExportedURL {
+                                UIPasteboard.general.string = url.path
+                                exportStatusText = "Copied path:\n\(url.path)"
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.gray)
+                        .font(.caption)
+                    }
+                }
             }
-            .padding()
+            .padding(16)
             .background(.black.opacity(0.7))
             .cornerRadius(12)
             .padding()
+        }
+        .overlay(alignment: .topTrailing) {
+            if inResponseWindow {
+                Button("I Saw It") {
+                    handleResponse()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .font(.title2)
+                .padding()
+            }
+        }
+        .sheet(isPresented: $showExportSheet) {
+            if let url = lastExportedURL {
+                ShareSheet(activityItems: [url])
+            } else {
+                Text("No export file found.")
+            }
         }
         .onAppear {
             startTest()
@@ -102,16 +197,32 @@ struct ImmersiveTestView: View {
     }
 
     private func startTest() {
+        // Generate shuffled trial list
+        trialList = settings.generateShuffledTrials()
+        currentTrialIndex = 0
+        sessionTrials = []
+        sessionStartTime = Date()
+        score = 0
+        missedCount = 0
+
         testActive = true
         print("Peripheral vision test started")
+        print("Total trials: \(trialList.count)")
+        print("Locations: \(settings.generateTestLocations().count)")
+        print("Repetitions per location: \(settings.repetitionsPerLocation)")
+
         scheduleNextStimulus()
     }
 
     private func scheduleNextStimulus() {
         guard testActive else { return }
+        guard currentTrialIndex < trialList.count else {
+            print("Test complete! \(sessionTrials.count) trials recorded.")
+            return
+        }
 
-        // Random delay between stimuli (1-3 seconds)
-        let delay = Double.random(in: 1.0...3.0)
+        // Random delay between stimuli
+        let delay = Double.random(in: settings.intervalRange)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             self.spawnPeripheralStimulus()
@@ -121,35 +232,29 @@ struct ImmersiveTestView: View {
     private func handleTap(on entity: Entity) {
         print("Tapped on entity: \(entity.name)")
 
-        // Only accept taps during response window
+        // Delegate to main response handler
+        handleResponse()
+    }
+
+    /// Handle user response (button press or tap)
+    private func handleResponse() {
+        // Only accept responses during response window
         guard inResponseWindow else {
-            print("Tap outside response window - ignored")
+            print("Response outside response window - ignored")
             return
         }
 
-        // Humphrey-style response: any tap counts as "seen" during the response window
+        // Calculate reaction time
         let now = CACurrentMediaTime()
+        var reactionTimeSec: Double? = nil
         if let onset = stimulusOnsetTime {
-            let rt = (now - onset) * 1000.0
-            lastReactionTimeMs = rt
-            print("Reaction time: \(rt) ms")
-        } else {
-            lastReactionTimeMs = nil
+            reactionTimeSec = now - onset
+            lastReactionTimeMs = reactionTimeSec! * 1000.0
+            print("Reaction time: \(lastReactionTimeMs!) ms")
         }
 
-        score += 1
-        print("Seen! Score: \(score)")
-
-        // Close response window and invalidate timers for this stimulus
-        inResponseWindow = false
-        currentStimulusID = nil
-
-        // Remove the stimulus (may already be removed after 200ms)
-        currentStimulus?.removeFromParent()
-        currentStimulus = nil
-
-        // Schedule next one
-        scheduleNextStimulus()
+        // Finalize trial with seen=true
+        finalizeTrial(seen: true, reactionTimeSec: reactionTimeSec)
     }
 
     private func spawnPeripheralStimulus() {
@@ -162,12 +267,16 @@ struct ImmersiveTestView: View {
             inResponseWindow = false
         }
 
-        // Random polar angle (0 to 360 degrees) - direction around fixation
-        // 0° = right, 90° = up, 180° = left, 270° = down
-        let polarAngleDeg = Float.random(in: 0...360)
+        // Check if we have more trials to run
+        guard currentTrialIndex < trialList.count else {
+            print("No more trials to run")
+            return
+        }
 
-        // Random eccentricity (20 to 60 degrees from center) - distance from fixation
-        let eccentricityDeg = Float.random(in: 20...60)
+        // Get pre-defined location from trial list
+        let location = trialList[currentTrialIndex]
+        let eccentricityDeg = location.eccentricityDeg
+        let polarAngleDeg = location.polarAngleDeg
 
         // Fixed radius from user (all stimuli at same distance = Humphrey's bowl)
         let radius = settings.bowlRadiusMeters
@@ -206,6 +315,9 @@ struct ImmersiveTestView: View {
         let stimulusID = UUID()
         currentStimulusID = stimulusID
 
+        // Reset trial finalization flag
+        currentTrialFinalized = false
+
         // Open response window
         inResponseWindow = true
 
@@ -215,7 +327,7 @@ struct ImmersiveTestView: View {
         stimulusOnsetTime = CACurrentMediaTime()
         lastReactionTimeMs = nil
 
-        print("Spawned stimulus at polarAngle: \(polarAngleDeg)°, eccentricity: \(eccentricityDeg)°")
+        print("Spawned stimulus [\(currentTrialIndex + 1)/\(trialList.count)] at polarAngle: \(polarAngleDeg)°, eccentricity: \(eccentricityDeg)°")
         print("  Physical size: \(stimulusDiameterMeters * 1000)mm diameter at \(radius)m")
 
         // Remove stimulus after stimulusDurationMs (e.g., 200ms)
@@ -233,14 +345,88 @@ struct ImmersiveTestView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + responseDelay) {
             if self.currentStimulusID == stimulusID && self.inResponseWindow {
                 // Response window closed - no response detected
-                self.inResponseWindow = false
-                self.currentStimulusID = nil
-                stimulus.removeFromParent()
-                self.currentStimulus = nil
-                self.missedCount += 1
-                print("Response window closed. Missed count: \(self.missedCount)")
-                self.scheduleNextStimulus()
+                // Finalize trial as missed
+                self.finalizeTrial(seen: false, reactionTimeSec: nil)
             }
         }
+    }
+
+    /// Finalize current trial (race-safe: only finalizes once per trial)
+    private func finalizeTrial(seen: Bool, reactionTimeSec: Double?) {
+        // Race-safe check: only finalize once
+        guard !currentTrialFinalized else {
+            print("Trial already finalized - ignoring duplicate finalization")
+            return
+        }
+        guard currentTrialIndex < trialList.count else {
+            print("No active trial to finalize")
+            return
+        }
+
+        currentTrialFinalized = true
+
+        // Get current location
+        let location = trialList[currentTrialIndex]
+
+        // Create trial record
+        let trial = TrialRecord(
+            id: currentStimulusID ?? UUID(),
+            trialIndex: currentTrialIndex,
+            location: location,
+            onsetTimestamp: Date(timeIntervalSince1970: (stimulusOnsetTime ?? CACurrentMediaTime())),
+            seen: seen,
+            reactionTimeSec: reactionTimeSec,
+            brightness: settings.stimulusBrightness,
+            bowlRadiusMeters: settings.bowlRadiusMeters
+        )
+
+        sessionTrials.append(trial)
+
+        // Update counters
+        if seen {
+            score += 1
+            print("Trial \(currentTrialIndex + 1): SEEN (RT: \(reactionTimeSec.map { String(format: "%.3f", $0) } ?? "N/A")s)")
+        } else {
+            missedCount += 1
+            print("Trial \(currentTrialIndex + 1): MISSED")
+        }
+
+        // Clean up
+        inResponseWindow = false
+        currentStimulusID = nil
+        currentStimulus?.removeFromParent()
+        currentStimulus = nil
+
+        // Move to next trial
+        currentTrialIndex += 1
+
+        // Schedule next stimulus
+        scheduleNextStimulus()
+    }
+
+    /// Export trials to CSV file and return URL
+    private func exportTrialsToCSV() -> URL {
+        var csv = TrialRecord.csvHeader + "\n"
+
+        for trial in sessionTrials {
+            csv += trial.toCSV() + "\n"
+        }
+
+        // Save to Documents directory
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyyMMdd_HHmmss"
+        let dateString = dateFormatter.string(from: sessionStartTime ?? Date())
+        let filename = "perimetry_\(dateString).csv"
+        let fileURL = documentsPath.appendingPathComponent(filename)
+
+        do {
+            try csv.write(to: fileURL, atomically: true, encoding: .utf8)
+            print("Exported \(sessionTrials.count) trials to: \(fileURL.path)")
+        } catch {
+            print("Error writing CSV: \(error)")
+        }
+
+        return fileURL
     }
 }

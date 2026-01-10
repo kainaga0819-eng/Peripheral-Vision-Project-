@@ -3,7 +3,7 @@ import SwiftUI
 struct MainMenuView: View {
     @Binding var gameState: GameState
     @StateObject private var dataManager = TestDataManager()
-    
+
     var body: some View {
         NavigationView {
             ZStack {
@@ -31,7 +31,7 @@ struct MainMenuView: View {
                             .font(.title3)
                             .foregroundColor(.white.opacity(0.8))
                     }
-                    
+
                     // Main Menu Buttons
                     VStack(spacing: 20) {
                         MenuButton(

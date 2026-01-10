@@ -30,7 +30,6 @@ struct SimpleImmersiveView: View {
     @Environment(\.openWindow) private var openWindow
 
     @State private var rootEntity = Entity()
-    @State private var buttonEntity: ModelEntity?
 
     // Test state
     @State private var testActive = false
@@ -112,43 +111,10 @@ struct SimpleImmersiveView: View {
             fixation.position = SIMD3<Float>(0, 0, -2)
             rootEntity.addChild(fixation)
 
-            // DEBUG: Always-visible yellow test ball to confirm scene is working
-            let debugBall = ModelEntity(
-                mesh: .generateSphere(radius: 0.1),
-                materials: [SimpleMaterial(color: UIColor.yellow, isMetallic: false)]
-            )
-            debugBall.position = SIMD3<Float>(0.3, 0, -2) // Slightly to the right of fixation
-            debugBall.name = "DebugBall"
-            rootEntity.addChild(debugBall)
-            print("✅ DEBUG: Added permanent yellow ball at (0.3, 0, -2)")
-
-            // Create center button entity
-            let button = ModelEntity(
-                mesh: .generateSphere(radius: 0.06),
-                materials: [UnlitMaterial(color: UIColor.green)]
-            )
-            button.position = SIMD3<Float>(0, 0, -1.5) // Positioned in center of view
-            button.name = "CenterButton"
-
-            // Enable interaction
-            button.components.set(InputTargetComponent())
-            button.components.set(CollisionComponent(shapes: [.generateSphere(radius: 0.06)]))
-
-            buttonEntity = button
-
             // Create debug grid (initially hidden)
             let grid = createDebugGrid()
             gridEntity = grid
         } update: { content in
-            // Show/hide button based on test state
-            if let button = buttonEntity {
-                if testActive && button.parent == nil {
-                    rootEntity.addChild(button)
-                } else if !testActive && button.parent != nil {
-                    button.removeFromParent()
-                }
-            }
-
             // Show/hide debug grid based on debug mode
             if let grid = gridEntity {
                 if debugMode && grid.parent == nil {
@@ -158,13 +124,6 @@ struct SimpleImmersiveView: View {
                 }
             }
         }
-        .gesture(
-            SpatialTapGesture()
-                .targetedToAnyEntity()
-                .onEnded { value in
-                    handleTap(on: value.entity)
-                }
-        )
         .overlay {
             if !testActive && (hitCount > 0 || missedCount > 0) {
                 // Results screen
@@ -218,6 +177,21 @@ struct SimpleImmersiveView: View {
                 }
 
                 if testActive {
+                    // === TRIAL PROGRESS COUNTER (ALWAYS VISIBLE) ===
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Trial: \(currentTrialID + 1) / \(clinicalGrid.count)")
+                            .font(.title3)
+                            .fontWeight(.bold)
+                            .foregroundColor(.white)
+                        Text("Remaining: \(clinicalGrid.count - (currentTrialID % clinicalGrid.count))")
+                            .font(.headline)
+                            .foregroundColor(.gray)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(.black.opacity(0.8))
+                    .cornerRadius(15)
+
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Hits: \(hitCount)")
                             .font(.headline)
@@ -498,16 +472,6 @@ struct SimpleImmersiveView: View {
         }
 
         return gridContainer
-    }
-
-    private func handleTap(on entity: Entity) {
-        print("👆 Tapped on entity: \(entity.name)")
-
-        // Check if tapped on the center button
-        if entity.name == "CenterButton" {
-            print("   Hit! Score: Hits=\(hitCount), Misses=\(missedCount)")
-            handleSawIt()
-        }
     }
 
     private func handleSawIt() {
