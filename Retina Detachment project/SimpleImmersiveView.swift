@@ -8,6 +8,13 @@ struct StimulusLocation {
     let id: Int
 }
 
+// Scheduled trial: combines a location with a specific brightness level
+struct ScheduledTrial {
+    let location: StimulusLocation
+    let brightnessValue: Float
+    let brightnessLevelIndex: Int // 0=Low, 1=Medium, 2=High
+}
+
 struct StimulusTrial: Identifiable {
     let id = UUID()
     let trialID: Int
@@ -18,6 +25,8 @@ struct StimulusTrial: Identifiable {
     let responseTime: Date?
     let wasHit: Bool
     let timedOut: Bool
+    let brightnessValue: Float      // Actual brightness (0.25, 0.60, 1.00)
+    let brightnessLevelIndex: Int   // Index into brightnessLevels array (0=Low, 1=Medium, 2=High)
 
     var reactionTimeSeconds: Double? {
         guard let responseTime else { return nil }
@@ -46,10 +55,19 @@ struct SimpleImmersiveView: View {
     @State private var debugMode = false
     @State private var gridEntity: Entity?
 
-    // Clinical parameters
-    @State private var availableLocations: [StimulusLocation] = []
+    // Clinical parameters - pre-generated trial list (48 locations × 3 brightness = 144 trials)
+    @State private var scheduledTrials: [ScheduledTrial] = []
     @State private var currentAngleDegrees: Float = 0
     @State private var currentEccentricityDegrees: Float = 0
+
+    // CSV Export
+    @State private var csvExportPath: String? = nil
+
+    // Brightness levels: Low (0.25), Medium (0.60), High (1.00)
+    let brightnessLevels: [Float] = [0.25, 0.60, 1.00]
+    let brightnessLabels: [String] = ["Low", "Medium", "High"]
+    @State private var currentBrightness: Float = 1.0
+    @State private var currentBrightnessIndex: Int = 2
 
     // Clinical grid: simplified 24-2 style with ~6° spacing
     // Covers central ±24° in all quadrants at multiple eccentricities
@@ -178,12 +196,17 @@ struct SimpleImmersiveView: View {
 
                 if testActive {
                     // === TRIAL PROGRESS COUNTER (ALWAYS VISIBLE) ===
+                    // Total trials = 48 locations × 3 brightness levels = 144
+                    let totalTrials = clinicalGrid.count * brightnessLevels.count
+                    let completedTrials = currentTrialID
+                    let remainingTrials = totalTrials - completedTrials
+
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Trial: \(currentTrialID + 1) / \(clinicalGrid.count)")
+                        Text("Trial: \(completedTrials + 1) / \(totalTrials)")
                             .font(.title3)
                             .fontWeight(.bold)
                             .foregroundColor(.white)
-                        Text("Remaining: \(clinicalGrid.count - (currentTrialID % clinicalGrid.count))")
+                        Text("Remaining: \(remainingTrials)")
                             .font(.headline)
                             .foregroundColor(.gray)
                     }
@@ -259,9 +282,28 @@ struct SimpleImmersiveView: View {
                     .font(.caption)
                 Text("Last Ecc: \(String(format: "%.1f", currentEccentricityDegrees))°")
                     .font(.caption)
+                Text("Brightness: \(brightnessLabels[currentBrightnessIndex]) (\(String(format: "%.2f", currentBrightness)))")
+                    .font(.caption)
+                    .foregroundColor(.yellow)
                 Text("Test Active: \(testActive ? "YES" : "NO")")
                     .font(.caption)
                     .foregroundColor(testActive ? .green : .red)
+
+                // Show CSV export status
+                if let exportPath = csvExportPath {
+                    Divider()
+                        .background(.white.opacity(0.3))
+                        .padding(.vertical, 4)
+
+                    Text("Exported CSV to:")
+                        .font(.caption2)
+                        .fontWeight(.bold)
+                        .foregroundColor(.green)
+                    Text(exportPath)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(.green)
+                        .lineLimit(3)
+                }
             }
             .foregroundColor(.white)
             .padding(12)
@@ -273,13 +315,30 @@ struct SimpleImmersiveView: View {
             // Start the test
             print("Test environment loaded. Starting test...")
             print("Clinical grid: \(clinicalGrid.count) locations")
-            availableLocations = clinicalGrid.shuffled() // Randomize order
+            print("Brightness levels: \(brightnessLevels.count)")
+
+            // Generate all 144 trials: each location × each brightness level
+            var allTrials: [ScheduledTrial] = []
+            for location in clinicalGrid {
+                for (index, brightness) in brightnessLevels.enumerated() {
+                    allTrials.append(ScheduledTrial(
+                        location: location,
+                        brightnessValue: brightness,
+                        brightnessLevelIndex: index
+                    ))
+                }
+            }
+
+            // Shuffle all trials for random presentation order
+            scheduledTrials = allTrials.shuffled()
+
+            print("Total trials: \(scheduledTrials.count) (48 locations × 3 brightness levels)")
             testActive = true
             scheduleNextStimulus()
         }
     }
 
-    private func createClinicalStimulus(angleDegrees: Float, eccentricityDegrees: Float, trialID: Int) -> ModelEntity {
+    private func createClinicalStimulus(angleDegrees: Float, eccentricityDegrees: Float, trialID: Int, brightness: Float) -> ModelEntity {
         // DEBUG: Big yellow spheres for simulator visibility
         let distance: Float = 2.0 // 2 meters from user
         let sphereRadius: Float = 0.08 // Big and easy to see
@@ -293,15 +352,20 @@ struct SimpleImmersiveView: View {
         let y = distance * sin(eccentricityRad) * sin(angleRad)
         let z = -distance * cos(eccentricityRad)
 
-        // Create big yellow sphere for visibility
+        // Apply brightness to yellow color (scaled R and G channels)
+        let b = CGFloat(brightness)
+        let brightYellow = UIColor(red: b, green: b, blue: 0.0, alpha: 1.0)
+
+        // Create stimulus sphere with brightness-adjusted color
         let stimulus = ModelEntity(
             mesh: .generateSphere(radius: sphereRadius),
-            materials: [UnlitMaterial(color: .yellow)]
+            materials: [UnlitMaterial(color: brightYellow)]
         )
         stimulus.position = SIMD3<Float>(x, y, z)
         stimulus.name = "Stimulus_\(trialID)"
 
         print("   Created stimulus sphere at angle=\(String(format: "%.1f", angleDegrees))°, ecc=\(String(format: "%.1f", eccentricityDegrees))°")
+        print("   Brightness: \(String(format: "%.2f", brightness))")
         print("   Position: x=\(String(format: "%.3f", x)), y=\(String(format: "%.3f", y)), z=\(String(format: "%.3f", z))")
 
         return stimulus
@@ -336,29 +400,37 @@ struct SimpleImmersiveView: View {
             currentStimulus = nil
         }
 
-        // Check if we need to reshuffle locations
-        if availableLocations.isEmpty {
-            print("⚠️  No more available locations, reshuffling grid")
-            availableLocations = clinicalGrid.shuffled()
+        // Check if all trials are complete
+        if scheduledTrials.isEmpty {
+            print("✅ All 144 trials complete!")
+            testActive = false
+            return
         }
 
-        // Select next location from clinical grid (without replacement)
-        let location = availableLocations.removeFirst()
+        // Get next scheduled trial (includes location + brightness)
+        let scheduledTrial = scheduledTrials.removeFirst()
+        let location = scheduledTrial.location
         currentAngleDegrees = location.angleDegrees
         currentEccentricityDegrees = location.eccentricityDegrees
 
+        // Use the pre-assigned brightness for this trial
+        currentBrightnessIndex = scheduledTrial.brightnessLevelIndex
+        currentBrightness = scheduledTrial.brightnessValue
+
         print("\n🎯 ===============================================")
-        print("🎯 SPAWNING STIMULUS #\(currentTrialID)")
+        print("🎯 SPAWNING STIMULUS #\(currentTrialID + 1) / 144")
         print("🎯 Location ID: \(location.id)")
         print("🎯 Angle: \(String(format: "%.1f", location.angleDegrees))°")
         print("🎯 Eccentricity: \(String(format: "%.1f", location.eccentricityDegrees))°")
+        print("🎯 Brightness: \(brightnessLabels[currentBrightnessIndex]) (\(String(format: "%.2f", currentBrightness)))")
         print("🎯 ===============================================")
 
         // Create and add the clinical stimulus
         let stimulus = createClinicalStimulus(
             angleDegrees: location.angleDegrees,
             eccentricityDegrees: location.eccentricityDegrees,
-            trialID: currentTrialID
+            trialID: currentTrialID,
+            brightness: currentBrightness
         )
         rootEntity.addChild(stimulus)
         currentStimulus = stimulus
@@ -421,11 +493,13 @@ struct SimpleImmersiveView: View {
             spawnTime: Date(), // Use current time if spawn time was cleared
             responseTime: nil,
             wasHit: false,
-            timedOut: true
+            timedOut: true,
+            brightnessValue: currentBrightness,
+            brightnessLevelIndex: currentBrightnessIndex
         )
         trials.append(trial)
 
-        print("📊 Trial recorded as TIMEOUT")
+        print("📊 Trial recorded as TIMEOUT (brightness: \(brightnessLabels[currentBrightnessIndex]))")
 
         print("   Misses: \(missedCount)")
 
@@ -504,11 +578,13 @@ struct SimpleImmersiveView: View {
                     spawnTime: spawnTime,
                     responseTime: responseTime,
                     wasHit: true,
-                    timedOut: false
+                    timedOut: false,
+                    brightnessValue: currentBrightness,
+                    brightnessLevelIndex: currentBrightnessIndex
                 )
                 trials.append(trial)
 
-                print("📊 Trial recorded: RT=\(String(format: "%.3f", trial.reactionTimeSeconds ?? 0))s")
+                print("📊 Trial recorded: RT=\(String(format: "%.3f", trial.reactionTimeSeconds ?? 0))s, brightness: \(brightnessLabels[currentBrightnessIndex])")
             }
 
             // Remove the stimulus and clear state
@@ -547,15 +623,25 @@ struct SimpleImmersiveView: View {
         currentTrialID = 0
         currentSpawnTime = nil
 
-        // Reshuffle clinical grid locations
-        availableLocations = clinicalGrid.shuffled()
+        // Regenerate all 144 trials (48 locations × 3 brightness levels)
+        var allTrials: [ScheduledTrial] = []
+        for location in clinicalGrid {
+            for (index, brightness) in brightnessLevels.enumerated() {
+                allTrials.append(ScheduledTrial(
+                    location: location,
+                    brightnessValue: brightness,
+                    brightnessLevelIndex: index
+                ))
+            }
+        }
+        scheduledTrials = allTrials.shuffled()
 
         // Restart test
         testActive = true
         scheduleNextStimulus()
 
         print("   Test restarted. Hits=0, Misses=0")
-        print("   Locations available: \(availableLocations.count)")
+        print("   Trials scheduled: \(scheduledTrials.count)")
     }
 
     private func leaveTest() {
@@ -566,6 +652,9 @@ struct SimpleImmersiveView: View {
 
         // Print final results
         printTestResults()
+
+        // Export CSV automatically
+        exportTrialsToCSV()
 
         Task {
             await dismissImmersiveSpace()
@@ -602,5 +691,49 @@ struct SimpleImmersiveView: View {
             print("Trial #\(trial.trialID): angle=\(String(format: "%.1f", trial.angleDegrees))°, ecc=\(String(format: "%.1f", trial.eccentricityDegrees))°, hit=\(trial.wasHit), RT=\(rtStr)")
         }
         print("====================\n")
+    }
+
+    private func exportTrialsToCSV() {
+        // Skip if no trials
+        guard !trials.isEmpty else {
+            print("⚠️ No trials to export")
+            return
+        }
+
+        // Create CSV content with brightness as int (1=least bright, 2=medium, 3=brightest)
+        var csv = "trial_index,angle_deg,ecc_deg,hit,reaction_time_sec,brightness_value\n"
+
+        for trial in trials {
+            let trialIndex = trial.trialID
+            let angleDeg = String(format: "%.1f", trial.angleDegrees)
+            let eccDeg = String(format: "%.1f", trial.eccentricityDegrees)
+            let hit = trial.wasHit ? "true" : "false"
+            let rtSec = trial.reactionTimeSeconds.map { String(format: "%.3f", $0) } ?? "-1.0"
+            // Convert brightness index (0,1,2) to int scale (1,2,3)
+            let brightnessInt = trial.brightnessLevelIndex + 1
+
+            csv += "\(trialIndex),\(angleDeg),\(eccDeg),\(hit),\(rtSec),\(brightnessInt)\n"
+        }
+
+        // Generate filename with timestamp
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyyMMdd_HHmmss"
+        let timestamp = dateFormatter.string(from: Date())
+        let filename = "perimetry_\(timestamp).csv"
+
+        // Get Documents directory
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let fileURL = documentsPath.appendingPathComponent(filename)
+
+        // Write CSV file
+        do {
+            try csv.write(to: fileURL, atomically: true, encoding: .utf8)
+            let fullPath = fileURL.path
+            print("✅ Exported CSV to: \(fullPath)")
+            csvExportPath = fullPath
+        } catch {
+            print("❌ Error writing CSV: \(error)")
+            csvExportPath = "Error: \(error.localizedDescription)"
+        }
     }
 }
