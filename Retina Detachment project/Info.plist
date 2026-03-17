@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Voice control lets you say "I see it" to register a response while keeping your gaze on the fixation point.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>The microphone is used for voice-controlled stimulus responses during the peripheral vision test.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationPreferredDefaultSceneSessionRole</key>

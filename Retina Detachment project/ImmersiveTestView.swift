@@ -25,18 +25,38 @@ struct ImmersiveTestView: View {
     @State private var lastExportedURL: URL? = nil
     @State private var exportStatusText: String? = nil
 
+    // Fixation break tracking
+    @State private var fixationBreakCount = 0
+    @State private var lastFixationBreakTarget: String? = nil
+    @State private var currentTrialFixationBreak = false
+    @State private var currentTrialFixationBreakTarget: String = ""
+
     private let settings = TestSettings.shared
 
     var body: some View {
-        RealityView { content in
-            // Create head anchor - makes entire stimulus bowl follow user's head
+        RealityView { content, attachments in
+            // NOTEBOOK: AnchorEntity(.head) locks the entire scene to the user's head pose.
+            // All children move with the user — stimuli never drift to world-space floor.
             let headAnchor = AnchorEntity(.head)
 
-            // Attach rootEntity to head anchor (not directly to world)
+            // NOTEBOOK: rootEntity is the scene root. Parenting it to headAnchor means every
+            // stimulus, background, and detector is positioned relative to the head, not the world.
             headAnchor.addChild(rootEntity)
+
+            // NOTEBOOK: rootEntity.position offsets the bowl centre from the head origin.
+            // yOffsetMeters / zOffsetMeters calibrate vertical height and forward depth.
+            let yOffsetMeters: Float = -5.55
+            let zOffsetMeters: Float = -2.45
+            rootEntity.position = SIMD3<Float>(0, yOffsetMeters, zOffsetMeters)
 
             // Add head anchor to scene
             content.add(headAnchor)
+
+            // Attach HUD panel to head anchor (left side, in front of user)
+            if let hudEntity = attachments.entity(for: "TestHUD") {
+                hudEntity.position = SIMD3<Float>(-0.25, -0.10, -0.70)
+                headAnchor.addChild(hudEntity)
+            }
 
             // Create dark background environment (use backgroundLevel from settings)
             let backgroundBrightness = CGFloat(settings.backgroundLevel)
@@ -60,24 +80,156 @@ struct ImmersiveTestView: View {
             tapCatcher.components.set(CollisionComponent(shapes: [.generateSphere(radius: tapCatcherRadius)]))
             rootEntity.addChild(tapCatcher)
 
-            // Create central fixation point (small, glowing)
-            let fixationPoint = ModelEntity(
-                mesh: .generateSphere(radius: 0.01),
-                materials: [SimpleMaterial(color: .white, isMetallic: false)]
-            )
-            fixationPoint.position = PeripheralGeometry.fixationPosition(distance: settings.bowlRadiusMeters)
+            // Fixation point is now a SwiftUI attachment (head-anchored) so it reliably
+            // receives look+pinch input. The 3D entity is gone; the attachment IS the fixation.
+            if let fixAttachment = attachments.entity(for: "FixationButton") {
+                fixAttachment.position = SIMD3<Float>(0, 0, -0.70)
+                headAnchor.addChild(fixAttachment)
+            }
 
-            // Make fixation point glow
-            let fixationMaterial = UnlitMaterial(color: .white)
-            fixationPoint.model?.materials = [fixationMaterial]
-
-            rootEntity.addChild(fixationPoint)
+            // Fixation break detector ring lives in scene space (rootEntity) near the bowl centre.
+            // These are a best-effort signal; primary response is via the SwiftUI attachment above.
+            let ringRadius: Float = 0.08
+            let detectorRadius: Float = 0.025
+            let detectorCount = 12
+            let fixPos = PeripheralGeometry.fixationPosition(distance: settings.bowlRadiusMeters)
+            for i in 0..<detectorCount {
+                let angle = Float(i) * (2.0 * .pi / Float(detectorCount))
+                let detector = ModelEntity(
+                    mesh: .generateSphere(radius: detectorRadius),
+                    materials: [UnlitMaterial(color: .clear)]
+                )
+                detector.name = "FixBreak_\(i)"
+                detector.position = SIMD3<Float>(
+                    fixPos.x + ringRadius * cos(angle),
+                    fixPos.y + ringRadius * sin(angle),
+                    fixPos.z
+                )
+                detector.components.set(InputTargetComponent())
+                detector.components.set(CollisionComponent(shapes: [.generateSphere(radius: detectorRadius)]))
+                rootEntity.addChild(detector)
+            }
 
             // Add some lighting
             let directionalLight = DirectionalLight()
             directionalLight.light.intensity = 5000
             directionalLight.look(at: [0, 0, 0], from: [0, 2, 2], relativeTo: nil)
             rootEntity.addChild(directionalLight)
+
+        } attachments: {
+            // NOTEBOOK: FixationButton is a SwiftUI Attachment (not a 3D entity).
+            // visionOS look+pinch only fires here when the user is gazing directly at the dot.
+            // A response is accepted only while inResponseWindow is true (stimulus is live).
+            Attachment(id: "FixationButton") {
+                Button(action: {
+                    if inResponseWindow {
+                        handleResponse()
+                    }
+                }) {
+                    ZStack {
+                        // Outer ring — subtle hit-area indicator
+                        Circle()
+                            .stroke(.white.opacity(0.25), lineWidth: 1)
+                            .frame(width: 36, height: 36)
+                        // Inner white dot — the fixation point
+                        Circle()
+                            .fill(.white)
+                            .frame(width: 12, height: 12)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+
+            Attachment(id: "TestHUD") {
+                VStack(alignment: .leading, spacing: 12) {
+                    // === TRIAL PROGRESS COUNTER ===
+                    VStack(alignment: .leading, spacing: 4) {
+                        if trialList.isEmpty {
+                            Text("Trial: 0 / 0")
+                                .font(.title)
+                                .fontWeight(.bold)
+                                .foregroundColor(.white)
+                        } else if currentTrialIndex >= trialList.count {
+                            Text("Trial: \(trialList.count) / \(trialList.count)")
+                                .font(.title)
+                                .fontWeight(.bold)
+                                .foregroundColor(.green)
+                            Text("Complete!")
+                                .font(.headline)
+                                .foregroundColor(.green)
+                        } else {
+                            let currentTrial = currentTrialIndex + 1
+                            let totalTrials = trialList.count
+                            let remainingTrials = totalTrials - currentTrial
+
+                            Text("Trial: \(currentTrial) / \(totalTrials)")
+                                .font(.title)
+                                .fontWeight(.bold)
+                                .foregroundColor(.white)
+                            Text("Remaining: \(remainingTrials)")
+                                .font(.headline)
+                                .foregroundColor(.gray)
+                        }
+                    }
+                    .padding(12)
+                    .background(.black.opacity(0.8))
+                    .cornerRadius(10)
+
+                    Divider()
+                        .background(.white.opacity(0.3))
+
+                    // Stats
+                    Text("Seen: \(score) | Missed: \(missedCount)")
+                        .font(.title3)
+                        .foregroundColor(.white)
+                    Text("RT: \(lastReactionTimeMs.map { "\(Int($0)) ms" } ?? "--")")
+                        .font(.caption)
+                        .foregroundColor(.white)
+                    Text("Fix breaks: \(fixationBreakCount)")
+                        .font(.caption)
+                        .foregroundColor(fixationBreakCount > 0 ? .orange : .white)
+                    if let target = lastFixationBreakTarget {
+                        Text("Last: \(target)")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
+
+                    if currentTrialIndex >= trialList.count && !trialList.isEmpty {
+                        Divider()
+                            .background(.white.opacity(0.3))
+
+                        Button("Export CSV") {
+                            let url = exportTrialsToCSV()
+                            lastExportedURL = url
+                            exportStatusText = "Saved CSV to:\n\(url.path)"
+                            showExportSheet = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.blue)
+                        .font(.headline)
+
+                        if let statusText = exportStatusText {
+                            Text(statusText)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(.green)
+                                .padding(.top, 8)
+
+                            Button("Copy Path") {
+                                if let url = lastExportedURL {
+                                    UIPasteboard.general.string = url.path
+                                    exportStatusText = "Copied path:\n\(url.path)"
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.gray)
+                            .font(.caption)
+                        }
+                    }
+                }
+                .padding(16)
+                .background(.black.opacity(0.7))
+                .cornerRadius(12)
+            }
 
         }
         .gesture(
@@ -87,103 +239,6 @@ struct ImmersiveTestView: View {
                     handleTap(on: value.entity)
                 }
         )
-        .overlay(alignment: .topLeading) {
-            VStack(alignment: .leading, spacing: 12) {
-                // === TRIAL PROGRESS COUNTER (ALWAYS VISIBLE, LARGE) ===
-                VStack(alignment: .leading, spacing: 4) {
-                    if trialList.isEmpty {
-                        Text("Trial: 0 / 0")
-                            .font(.title)
-                            .fontWeight(.bold)
-                            .foregroundColor(.white)
-                    } else if currentTrialIndex >= trialList.count {
-                        // Test complete: show total/total
-                        Text("Trial: \(trialList.count) / \(trialList.count)")
-                            .font(.title)
-                            .fontWeight(.bold)
-                            .foregroundColor(.green)
-                        Text("Complete!")
-                            .font(.headline)
-                            .foregroundColor(.green)
-                    } else {
-                        // Active trial: show (currentTrialIndex + 1) for 1-based counting
-                        let currentTrial = currentTrialIndex + 1
-                        let totalTrials = trialList.count
-                        let remainingTrials = totalTrials - currentTrial
-
-                        Text("Trial: \(currentTrial) / \(totalTrials)")
-                            .font(.title)
-                            .fontWeight(.bold)
-                            .foregroundColor(.white)
-                        Text("Remaining: \(remainingTrials)")
-                            .font(.headline)
-                            .foregroundColor(.gray)
-                    }
-                }
-                .padding(12)
-                .background(.black.opacity(0.8))
-                .cornerRadius(10)
-
-                Divider()
-                    .background(.white.opacity(0.3))
-
-                // Stats
-                Text("Seen: \(score) | Missed: \(missedCount)")
-                    .font(.title3)
-                    .foregroundColor(.white)
-                Text("RT: \(lastReactionTimeMs.map { "\(Int($0)) ms" } ?? "--")")
-                    .font(.caption)
-                    .foregroundColor(.white)
-
-                if currentTrialIndex >= trialList.count && !trialList.isEmpty {
-                    Divider()
-                        .background(.white.opacity(0.3))
-
-                    Button("Export CSV") {
-                        let url = exportTrialsToCSV()
-                        lastExportedURL = url
-                        exportStatusText = "Saved CSV to:\n\(url.path)"
-                        showExportSheet = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.blue)
-                    .font(.headline)
-
-                    // Show export status and copy button
-                    if let statusText = exportStatusText {
-                        Text(statusText)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.green)
-                            .padding(.top, 8)
-
-                        Button("Copy Path") {
-                            if let url = lastExportedURL {
-                                UIPasteboard.general.string = url.path
-                                exportStatusText = "Copied path:\n\(url.path)"
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.gray)
-                        .font(.caption)
-                    }
-                }
-            }
-            .padding(16)
-            .background(.black.opacity(0.7))
-            .cornerRadius(12)
-            .padding()
-        }
-        .overlay(alignment: .topTrailing) {
-            if inResponseWindow {
-                Button("I Saw It") {
-                    handleResponse()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .font(.title2)
-                .padding()
-            }
-        }
         .sheet(isPresented: $showExportSheet) {
             if let url = lastExportedURL {
                 ShareSheet(activityItems: [url])
@@ -230,10 +285,13 @@ struct ImmersiveTestView: View {
     }
 
     private func handleTap(on entity: Entity) {
-        print("Tapped on entity: \(entity.name)")
-
-        // Delegate to main response handler
-        handleResponse()
+        // NOTEBOOK: Any spatial tap that reaches here hit a 3D entity, NOT the fixation button.
+        // That means the user pinched while looking away from the fixation dot → fixation break.
+        print("Off-fixation entity tap: \(entity.name)")
+        fixationBreakCount += 1
+        lastFixationBreakTarget = entity.name
+        currentTrialFixationBreak = true
+        currentTrialFixationBreakTarget = entity.name
     }
 
     /// Handle user response (button press or tap)
@@ -244,7 +302,8 @@ struct ImmersiveTestView: View {
             return
         }
 
-        // Calculate reaction time
+        // NOTEBOOK: reactionTimeSec = now − stimulusOnsetTime (both from CACurrentMediaTime).
+        // Millisecond precision. Only valid when stimulusOnsetTime was set at spawn.
         let now = CACurrentMediaTime()
         var reactionTimeSec: Double? = nil
         if let onset = stimulusOnsetTime {
@@ -281,14 +340,16 @@ struct ImmersiveTestView: View {
         // Fixed radius from user (all stimuli at same distance = Humphrey's bowl)
         let radius = settings.bowlRadiusMeters
 
-        // Convert angular coordinates to 3D position using geometry helper
+        // NOTEBOOK: angularToPosition converts (eccentricity°, polar°, radius) → SIMD3<Float>.
+        // All stimuli lie on a sphere of constant radius — the Humphrey bowl model.
         let position = PeripheralGeometry.angularToPosition(
             eccentricityDeg: eccentricityDeg,
             polarAngleDeg: polarAngleDeg,
             radius: radius
         )
 
-        // DEBUG: Verify stimulus is at fixed bowl radius
+        // NOTEBOOK: length(position) must equal radius for every trial.
+        // This confirms the bowl geometry is correct — every stimulus is equidistant from the user.
         let actualDistance = length(position)
         print("DEBUG: Stimulus distance from origin = \(actualDistance)m (expected: \(radius)m)")
 
@@ -318,12 +379,17 @@ struct ImmersiveTestView: View {
         // Reset trial finalization flag
         currentTrialFinalized = false
 
+        // Reset fixation break flags for this trial
+        currentTrialFixationBreak = false
+        currentTrialFixationBreakTarget = ""
+
         // Open response window
         inResponseWindow = true
 
         rootEntity.addChild(stimulus)
 
-        // Record onset for reaction time
+        // NOTEBOOK: stimulusOnsetTime stamps the exact moment the stimulus appears.
+        // Reaction time = fixation-button press time − this value (measured in handleResponse).
         stimulusOnsetTime = CACurrentMediaTime()
         lastReactionTimeMs = nil
 
@@ -340,13 +406,12 @@ struct ImmersiveTestView: View {
             }
         }
 
-        // Close response window after responseWindowMs (e.g., 1200ms total)
+        // NOTEBOOK: Response window closes after responseWindowMs with no pinch → trial is a miss.
+        // reactionTimeSec is stored as -1.0 (not nil) so every CSV row has a numeric RT field.
         let responseDelay = settings.responseWindowMs / 1000.0
         DispatchQueue.main.asyncAfter(deadline: .now() + responseDelay) {
             if self.currentStimulusID == stimulusID && self.inResponseWindow {
-                // Response window closed - no response detected
-                // Finalize trial as missed
-                self.finalizeTrial(seen: false, reactionTimeSec: nil)
+                self.finalizeTrial(seen: false, reactionTimeSec: -1.0)
             }
         }
     }
@@ -377,7 +442,9 @@ struct ImmersiveTestView: View {
             seen: seen,
             reactionTimeSec: reactionTimeSec,
             brightness: settings.stimulusBrightness,
-            bowlRadiusMeters: settings.bowlRadiusMeters
+            bowlRadiusMeters: settings.bowlRadiusMeters,
+            fixationBreak: currentTrialFixationBreak,
+            fixationBreakTarget: currentTrialFixationBreakTarget
         )
 
         sessionTrials.append(trial)
@@ -430,3 +497,5 @@ struct ImmersiveTestView: View {
         return fileURL
     }
 }
+
+

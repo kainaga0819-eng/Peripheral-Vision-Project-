@@ -120,8 +120,10 @@ struct TrialRecord: Codable, Identifiable {
     let reactionTimeSec: Double?
     let brightness: Float
     let bowlRadiusMeters: Float
+    let fixationBreak: Bool
+    let fixationBreakTarget: String
 
-    init(id: UUID = UUID(), trialIndex: Int, location: TestLocation, onsetTimestamp: Date, seen: Bool, reactionTimeSec: Double?, brightness: Float, bowlRadiusMeters: Float) {
+    init(id: UUID = UUID(), trialIndex: Int, location: TestLocation, onsetTimestamp: Date, seen: Bool, reactionTimeSec: Double?, brightness: Float, bowlRadiusMeters: Float, fixationBreak: Bool = false, fixationBreakTarget: String = "") {
         self.id = id
         self.trialIndex = trialIndex
         self.eccentricityDeg = location.eccentricityDeg
@@ -131,19 +133,22 @@ struct TrialRecord: Codable, Identifiable {
         self.reactionTimeSec = reactionTimeSec
         self.brightness = brightness
         self.bowlRadiusMeters = bowlRadiusMeters
+        self.fixationBreak = fixationBreak
+        self.fixationBreakTarget = fixationBreakTarget
     }
 
-    /// CSV header row
+    // NOTEBOOK: CSV columns — exactly 6 fields, always numeric, ready for analysis.
+    // reaction_time_sec is -1.0 for missed trials (never blank) so every row parses cleanly.
     static var csvHeader: String {
-        "stimulus_id,trial_index,ecc_deg,pol_deg,onset_timestamp,seen,rt_sec,brightness,bowl_radius_m"
+        "trial_index,polar_angle_deg,eccentricity_deg,brightness_value,hit,reaction_time_sec"
     }
 
     /// Convert to CSV row
     func toCSV() -> String {
-        let iso8601 = ISO8601DateFormatter().string(from: onsetTimestamp)
-        let seenInt = seen ? 1 : 0
-        let rtString = reactionTimeSec.map { String(format: "%.3f", $0) } ?? ""
-        return "\(id.uuidString),\(trialIndex),\(eccentricityDeg),\(polarAngleDeg),\(iso8601),\(seenInt),\(rtString),\(brightness),\(bowlRadiusMeters)"
+        let hitInt = seen ? 1 : 0
+        // Use -1.0 sentinel for misses so rt column is always a valid number
+        let rtString = String(format: "%.3f", reactionTimeSec ?? -1.0)
+        return "\(trialIndex),\(polarAngleDeg),\(eccentricityDeg),\(brightness),\(hitInt),\(rtString)"
     }
 }
 
