@@ -66,6 +66,7 @@ struct SimpleResultsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var sessions: [SimpleTestSession] = []
     @State private var selectedSession: SimpleTestSession? = nil
+    @State private var showingClearConfirmation = false
 
     private var dateFormatter: DateFormatter {
         let f = DateFormatter()
@@ -110,12 +111,35 @@ struct SimpleResultsView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { dismiss() }
                 }
+                if !sessions.isEmpty {
+                    ToolbarItem(placement: .destructiveAction) {
+                        Button(role: .destructive) {
+                            showingClearConfirmation = true
+                        } label: {
+                            Label("Clear History", systemImage: "trash")
+                                .foregroundColor(.red)
+                        }
+                    }
+                }
             }
             .sheet(item: $selectedSession) { session in
                 SessionDetailSheet(session: session)
             }
             .onAppear {
                 sessions = SimpleSessionStore.loadAll()
+            }
+            .confirmationDialog(
+                "Clear All History?",
+                isPresented: $showingClearConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete All Sessions", role: .destructive) {
+                    SimpleSessionStore.clearAll()
+                    sessions = []
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("This will permanently delete all \(sessions.count) saved test session\(sessions.count == 1 ? "" : "s"). This cannot be undone.")
             }
         }
     }
@@ -156,6 +180,7 @@ struct SessionRowView: View {
 struct SessionDetailSheet: View {
     let session: SimpleTestSession
     @Environment(\.dismiss) private var dismiss
+    @State private var csvFileURL: URL? = nil
 
     private var dateFormatter: DateFormatter {
         let f = DateFormatter()
@@ -164,8 +189,8 @@ struct SessionDetailSheet: View {
         return f
     }
 
-    // Builds the CSV as a temp file URL so ShareLink can attach it
-    private var csvFileURL: URL {
+    // Builds the CSV once on appear, off the main thread
+    private func buildCSV() async -> URL {
         var csv = "trial_index,angle_deg,ecc_deg,hit,reaction_time_sec,brightness_value\n"
         for trial in session.trials {
             let hit = trial.wasHit ? "true" : "false"
@@ -174,7 +199,8 @@ struct SessionDetailSheet: View {
         }
         let df = DateFormatter()
         df.dateFormat = "yyyyMMdd_HHmmss"
-        let name = "perimetry_\(df.string(from: session.date)).csv"
+        let modeTag = session.modeName.replacingOccurrences(of: " ", with: "_")
+        let name = "perimetry_\(modeTag)_\(df.string(from: session.date)).csv"
         let url  = FileManager.default.temporaryDirectory.appendingPathComponent(name)
         try? csv.write(to: url, atomically: true, encoding: .utf8)
         return url
@@ -256,13 +282,21 @@ struct SessionDetailSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    ShareLink(item: csvFileURL) {
-                        Label("Export CSV", systemImage: "square.and.arrow.up")
+                    if let url = csvFileURL {
+                        ShareLink(item: url) {
+                            Label("Export CSV", systemImage: "square.and.arrow.up")
+                        }
+                    } else {
+                        ProgressView()
+                            .scaleEffect(0.7)
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .task {
+                csvFileURL = await buildCSV()
             }
         }
     }

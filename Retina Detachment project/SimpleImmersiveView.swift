@@ -180,6 +180,7 @@ struct SimpleTestSession: Codable, Identifiable {
     let hitCount: Int
     let missedCount: Int
     let trials: [StimulusTrial]
+    var modeName: String = "Normal Test"  // default keeps old saved sessions decodable
 
     var accuracy: Double {
         guard completedTrials > 0 else { return 0 }
@@ -230,9 +231,16 @@ struct SimpleImmersiveView: View {
     @Environment(\.openWindow) private var openWindow
 
     @StateObject private var speech = SpeechController()
+    // Which eye is currently being tested — right (OD) first, then left (OS)
+    enum TestedEye { case right, left }
+    @State private var currentEye: TestedEye = .right
+
     @AppStorage("voiceControlEnabled") private var voiceControlEnabled = false
     @AppStorage("simulationModeEnabled") private var simulationModeEnabled = false
-    @AppStorage("simulationProfileRaw") private var simulationProfileRaw = VisionProfile.normal.rawValue
+    @AppStorage("simulationSeverityRaw") private var simulationSeverityRaw = DetachmentSeverity.mild.rawValue
+    @State private var detachmentZone: DetachmentZone? = nil
+    @AppStorage("monocularModeEnabled") private var monocularModeEnabled = false
+    @State private var showEyeSwitchOverlay = false
     @State private var isGazingAtFixation = false
 
     @State private var rootEntity = Entity()
@@ -329,6 +337,12 @@ struct SimpleImmersiveView: View {
                 headAnchor.addChild(topBar)
             }
 
+            // Eye-switch overlay — shown between right-eye and left-eye tests in monocular mode
+            if let eyeSwitch = attachments.entity(for: "EyeSwitchOverlay") {
+                eyeSwitch.position = SIMD3<Float>(0, 0, -1.5)
+                headAnchor.addChild(eyeSwitch)
+            }
+
             // Settings panel: centered, only visible when paused
             if let settingsPanel = attachments.entity(for: "SettingsPanel") {
                 settingsPanel.position = SIMD3<Float>(0, 0, -0.90)
@@ -376,6 +390,11 @@ struct SimpleImmersiveView: View {
                     Text("\(pct)%")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.white.opacity(0.8))
+                    if monocularModeEnabled {
+                        Text(currentEye == .right ? "OD" : "OS")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(currentEye == .right ? .blue.opacity(0.9) : .orange.opacity(0.9))
+                    }
                 }
             }
 
@@ -504,6 +523,48 @@ struct SimpleImmersiveView: View {
                     .cornerRadius(22)
                 }
             }
+
+            // Eye-switch overlay — full-screen prompt between OD and OS tests
+            Attachment(id: "EyeSwitchOverlay") {
+                if showEyeSwitchOverlay {
+                    VStack(spacing: 28) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 60))
+                            .foregroundColor(.green)
+
+                        Text("Right Eye (OD) Complete")
+                            .font(.largeTitle).fontWeight(.bold).foregroundColor(.white)
+
+                        Divider().background(.white.opacity(0.3)).frame(width: 320)
+
+                        VStack(spacing: 10) {
+                            Text("Now testing: LEFT Eye (OS)")
+                                .font(.title2).fontWeight(.semibold).foregroundColor(.orange)
+                            Text("Please cover your RIGHT eye\nbefore continuing.")
+                                .font(.body).foregroundColor(.white.opacity(0.85))
+                                .multilineTextAlignment(.center)
+                        }
+
+                        Button {
+                            showEyeSwitchOverlay = false
+                            testActive = true
+                            scheduleNextStimulus()
+                        } label: {
+                            Label("Begin Left Eye Test", systemImage: "arrow.right.circle.fill")
+                                .font(.headline).fontWeight(.semibold)
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 32).padding(.vertical, 16)
+                                .background(.orange)
+                                .cornerRadius(14)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(36)
+                    .frame(width: 420)
+                    .background(.black.opacity(0.90))
+                    .cornerRadius(26)
+                }
+            }
         }
         .onAppear {
             if let saved = SavedTestProgress.load() {
@@ -531,6 +592,18 @@ struct SimpleImmersiveView: View {
             testActive = true
             scheduleNextStimulus()
 
+            // Generate a fresh detachment zone when simulation mode starts
+            if simulationModeEnabled {
+                let severity = DetachmentSeverity(rawValue: simulationSeverityRaw) ?? .mild
+                let zone = severity.generate()
+                detachmentZone = zone
+                if let z = zone {
+                    print(z.locationDescription)
+                } else {
+                    print("Normal Vision — no detachment zone, full field healthy")
+                }
+            }
+
             // Auto-start voice control if the user enabled it from the menu
             if voiceControlEnabled {
                 speech.requestPermissionAndStart()
@@ -557,7 +630,9 @@ struct SimpleImmersiveView: View {
         let y = distance * sin(eccentricityRad) * sin(angleRad)
         let z = -distance * cos(eccentricityRad)
 
-        // White stimulus — opacity carries the brightness level so it fades into the white background
+        // White stimulus — opacity carries the brightness level so it fades into the white background.
+        // NOTE: Per-eye (monocular) rendering requires StimulusShader.metal + Metal Toolchain.
+        //       Install via Xcode → Settings → Platforms, then re-add the shader and swap to CustomMaterial.
         let stimulusColor = UIColor(white: 1.0, alpha: CGFloat(brightness))
 
         // Create stimulus sphere
@@ -607,6 +682,34 @@ struct SimpleImmersiveView: View {
 
         print("Trial \(currentTrialID + 1)/228  |  Angle: \(String(format: "%.0f", location.angleDegrees))  Ecc: \(String(format: "%.0f", location.eccentricityDegrees))  Brightness: \(brightnessLabels[currentBrightnessIndex])")
 
+        // Simulation mode: if stimulus falls inside the detachment zone, skip rendering entirely.
+        // The retina cannot perceive this location, so the stimulus simply never appears.
+        if simulationModeEnabled {
+            let angleRad = location.angleDegrees * Float.pi / 180.0
+            let xDeg = cos(angleRad) * location.eccentricityDegrees
+            let yDeg = sin(angleRad) * location.eccentricityDegrees
+            if detachmentZone?.isHealthy(xDeg: xDeg, yDeg: yDeg) == false {
+                print("Trial \(currentTrialID + 1)/228  |  BLIND ZONE — skipped")
+                missedCount += 1
+                let trial = StimulusTrial(
+                    trialID: currentTrialID,
+                    spotID: currentTrialID,
+                    angleDegrees: location.angleDegrees,
+                    eccentricityDegrees: location.eccentricityDegrees,
+                    spawnTime: Date(),
+                    responseTime: nil,
+                    wasHit: false,
+                    timedOut: true,
+                    brightnessValue: currentBrightness,
+                    brightnessLevelIndex: currentBrightnessIndex
+                )
+                trials.append(trial)
+                currentTrialID += 1
+                scheduleNextStimulus()
+                return
+            }
+        }
+
         // Create and add the clinical stimulus
         let stimulus = createClinicalStimulus(
             angleDegrees: location.angleDegrees,
@@ -621,8 +724,8 @@ struct SimpleImmersiveView: View {
         print("✅ Stimulus added to scene. Should be VISIBLE NOW!")
 
         // Flash duration and response window
-        let flashDuration  = 2.0
-        let timeoutSeconds = 3.0
+        let flashDuration  = 0.6
+        let timeoutSeconds = 1.5
         let thisTrialID = currentTrialID
 
         // Simulation mode: auto-respond based on the selected vision profile
@@ -655,32 +758,34 @@ struct SimpleImmersiveView: View {
     }
 
     private func handleTimeout(forTrialID trialID: Int, angle: Float, eccentricity: Float) {
-        // Only process timeout if:
-        // 1. Test is still active
-        // 2. This is still the current trial (user hasn't responded yet)
         guard testActive,
               let stimulus = currentStimulus,
               stimulus.name == "Stimulus_\(trialID)" else {
             return
         }
 
-        print("Trial \(trialID + 1)/228  |  MISSED  |  Hits: \(hitCount)  Misses: \(missedCount + 1)")
-
-        // Remove the stimulus and clear state
+        // Clean up — flash timer may have already removed it, removeFromParent is safe either way
         stimulus.removeFromParent()
         currentStimulus = nil
-        currentSpawnTime = nil
 
-        // Increment miss count
+        if currentSpawnTime == nil {
+            // spawnTime was cleared by handleSawIt — hit already recorded, just move on
+            scheduleNextStimulus()
+            return
+        }
+
+        // No response within the window — record as miss
+        currentSpawnTime = nil
         missedCount += 1
 
-        // Record the trial as a miss
+        print("Trial \(trialID + 1)/228  |  MISSED  |  Hits: \(hitCount)  Misses: \(missedCount)")
+
         let trial = StimulusTrial(
             trialID: trialID,
             spotID: trialID,
-            angleDegrees: angle * 180.0 / .pi, // Convert radians back to degrees
+            angleDegrees: angle * 180.0 / .pi,
             eccentricityDegrees: eccentricity,
-            spawnTime: Date(), // Use current time if spawn time was cleared
+            spawnTime: Date(),
             responseTime: nil,
             wasHit: false,
             timedOut: true,
@@ -689,8 +794,6 @@ struct SimpleImmersiveView: View {
         )
         trials.append(trial)
 
-
-        // Schedule next stimulus
         scheduleNextStimulus()
     }
 
@@ -738,10 +841,10 @@ struct SimpleImmersiveView: View {
     private func handleSawIt() {
         guard testActive else { return }
 
+        // Require an active spawn time — nil means this trial was already responded to
         if let stimulus = currentStimulus, let spawnTime = currentSpawnTime {
 
             let responseTime = Date()
-            let reactionTime = responseTime.timeIntervalSince(spawnTime)
 
             // Get stimulus info from its name
             if let trialIDStr = stimulus.name.split(separator: "_").last,
@@ -761,19 +864,14 @@ struct SimpleImmersiveView: View {
                     brightnessLevelIndex: currentBrightnessIndex
                 )
                 trials.append(trial)
+                hitCount += 1
 
-                print("Trial \(trialID + 1)/228  |  HIT  |  RT: \(String(format: "%.3f", trial.reactionTimeSeconds ?? 0))s  |  Hits: \(hitCount + 1)  Misses: \(missedCount)")
+                print("Trial \(trialID + 1)/228  |  HIT  |  RT: \(String(format: "%.3f", trial.reactionTimeSeconds ?? 0))s  |  Hits: \(hitCount)  Misses: \(missedCount)")
             }
 
-            // Remove the stimulus and clear state
-            stimulus.removeFromParent()
-            currentStimulus = nil
+            // Mark as responded — stimulus stays visible until the flash timer removes it.
+            // handleTimeout will see nil spawnTime and skip recording a miss.
             currentSpawnTime = nil
-
-            // Increment hit count
-            hitCount += 1
-
-            scheduleNextStimulus()
         }
     }
 
@@ -840,13 +938,14 @@ struct SimpleImmersiveView: View {
         currentStimulus = nil
         currentSpawnTime = nil
 
-        let profile = VisionProfile(rawValue: simulationProfileRaw) ?? .normal
+        let severity = DetachmentSeverity(rawValue: simulationSeverityRaw) ?? .mild
+        let zone = detachmentZone   // use already-generated zone if available
 
         // Record the currently active trial if one was mid-display
         if let activeTrialName = currentStimulus?.name,
            let trialIDStr = activeTrialName.split(separator: "_").last,
            let trialID = Int(trialIDStr) {
-            recordSimulatedTrial(profile: profile, trialID: trialID,
+            recordSimulatedTrial(zone: zone, severity: severity, trialID: trialID,
                                  angleDeg: currentAngleDegrees,
                                  eccentricityDeg: currentEccentricityDegrees,
                                  brightness: currentBrightness,
@@ -856,7 +955,7 @@ struct SimpleImmersiveView: View {
         // Bulk-record every remaining scheduled trial
         for scheduled in scheduledTrials {
             let loc = scheduled.location
-            recordSimulatedTrial(profile: profile, trialID: currentTrialID,
+            recordSimulatedTrial(zone: zone, severity: severity, trialID: currentTrialID,
                                  angleDeg: loc.angleDegrees,
                                  eccentricityDeg: loc.eccentricityDegrees,
                                  brightness: scheduled.brightnessValue,
@@ -865,23 +964,27 @@ struct SimpleImmersiveView: View {
         }
         scheduledTrials = []
 
+        // Simulation is always a single test — ensure monocular flag doesn't trigger eye switching
+        monocularModeEnabled = false
+
         print("Fast forward complete — \(trials.count) trials processed")
         completeTest()
     }
 
-    private func recordSimulatedTrial(profile: VisionProfile, trialID: Int,
-                                      angleDeg: Float, eccentricityDeg: Float,
+    private func recordSimulatedTrial(zone: DetachmentZone?, severity: DetachmentSeverity,
+                                      trialID: Int, angleDeg: Float, eccentricityDeg: Float,
                                       brightness: Float, brightnessIndex: Int) {
         let angleRad = angleDeg * Float.pi / 180.0
         let xDeg = cos(angleRad) * eccentricityDeg
         let yDeg = sin(angleRad) * eccentricityDeg
 
-        let sensitivity = profile.sensitivity(xDeg: xDeg, yDeg: yDeg, brightness: brightness)
+        let sensitivity = zone?.sensitivity(xDeg: xDeg, yDeg: yDeg, brightness: brightness)
+                       ?? DetachmentZone.healthySensitivity(xDeg: xDeg, yDeg: yDeg, brightness: brightness)
         let isMistake = Double.random(in: 0...1) < (10.0 / 228.0)
         let wasHit = isMistake ? (Double.random(in: 0...1) > sensitivity) : (Double.random(in: 0...1) < sensitivity)
 
         let spawnTime = Date()
-        let rt = wasHit ? profile.reactionTime(eccentricityDeg: eccentricityDeg, brightness: brightness) : nil
+        let rt = wasHit ? severity.reactionTime(eccentricityDeg: eccentricityDeg, brightness: brightness) : nil
 
         let trial = StimulusTrial(
             trialID: trialID, spotID: trialID,
@@ -900,18 +1003,20 @@ struct SimpleImmersiveView: View {
     // MARK: - Simulation auto-response
 
     private func scheduleSimulatedResponse(xDeg: Float, yDeg: Float, eccentricityDeg: Float, brightness: Float, trialID: Int) {
-        let profile = VisionProfile(rawValue: simulationProfileRaw) ?? .normal
-        let sensitivity = profile.sensitivity(xDeg: xDeg, yDeg: yDeg, brightness: brightness)
+        let severity = DetachmentSeverity(rawValue: simulationSeverityRaw) ?? .mild
+        let sensitivity = detachmentZone?.sensitivity(xDeg: xDeg, yDeg: yDeg, brightness: brightness)
+                       ?? DetachmentZone.healthySensitivity(xDeg: xDeg, yDeg: yDeg, brightness: brightness)
 
-        // Inject ~10 random mistakes across 228 trials (each trial has ~4.4% mistake chance)
+        // Inject ~10 random mistakes across 228 trials (~4.4% chance per trial)
         let isMistake = Double.random(in: 0...1) < (10.0 / 228.0)
         let willSee   = isMistake ? (Double.random(in: 0...1) > sensitivity) : (Double.random(in: 0...1) < sensitivity)
 
-        print("Sim  |  Profile: \(profile.rawValue)  |  Sensitivity: \(String(format: "%.2f", sensitivity))  |  \(willSee ? "WILL SEE" : "WILL MISS")\(isMistake ? "  [mistake]" : "")")
+        let inDetachment = !(detachmentZone?.isHealthy(xDeg: xDeg, yDeg: yDeg) ?? true)
+        print("Sim  |  \(severity.rawValue)  |  \(inDetachment ? "DETACHMENT" : "healthy")  |  sens \(String(format: "%.2f", sensitivity))  |  \(willSee ? "WILL SEE" : "WILL MISS")\(isMistake ? "  [mistake]" : "")")
 
         guard willSee else { return }  // miss: let the normal 3-second timeout fire
 
-        let rt = profile.reactionTime(eccentricityDeg: eccentricityDeg, brightness: brightness)
+        let rt = severity.reactionTime(eccentricityDeg: eccentricityDeg, brightness: brightness)
         DispatchQueue.main.asyncAfter(deadline: .now() + rt) {
             guard self.testActive, self.currentStimulus?.name == "Stimulus_\(trialID)" else { return }
             self.handleSawIt()
@@ -920,22 +1025,52 @@ struct SimpleImmersiveView: View {
 
     private func completeTest() {
         testActive = false
+
+        // Simulation is always single-eye — clear monocular flag before it can trigger eye switching
+        if simulationModeEnabled { monocularModeEnabled = false }
+        let modeName = simulationModeEnabled
+            ? (DetachmentSeverity(rawValue: simulationSeverityRaw)?.rawValue ?? simulationSeverityRaw)
+            : "Normal Test"
         simulationModeEnabled = false
-        print("Test complete — session saved")
-        saveSession()
-        exportTrialsToCSV()
-        Task {
-            await dismissImmersiveSpace()
-            try? await Task.sleep(nanoseconds: 100_000_000)
-            openWindow(id: "MainWindow")
+
+        saveSession(modeName: modeName)
+        exportTrialsToCSV(modeName: modeName)
+
+        if currentEye == .right && monocularModeEnabled {
+            // Right eye (OD) done — prepare left eye (OS) (monocular only)
+            print("Right eye (OD) complete — switching to left eye (OS)")
+            currentEye = .left
+            trials.removeAll()
+            hitCount = 0; missedCount = 0; currentTrialID = 0
+            var all: [ScheduledTrial] = []
+            for loc in clinicalGrid {
+                for (i, b) in brightnessLevels.enumerated() {
+                    all.append(ScheduledTrial(location: loc, brightnessValue: b, brightnessLevelIndex: i))
+                }
+            }
+            scheduledTrials = all.shuffled()
+            showEyeSwitchOverlay = true
+        } else {
+            // Test done — monocular left eye, normal test, or simulation (single-eye)
+            print("\(currentEye == .left ? "Left eye (OS)" : "Test") complete — all done")
+            currentEye = .right
+            monocularModeEnabled = false
+            Task {
+                await dismissImmersiveSpace()
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                openWindow(id: "MainWindow")
+            }
         }
     }
 
     private func leaveTest() {
         testActive = false
+        let modeName = simulationModeEnabled
+            ? (DetachmentSeverity(rawValue: simulationSeverityRaw)?.rawValue ?? simulationSeverityRaw)
+            : "Normal Test"
         simulationModeEnabled = false
-        saveSession()
-        exportTrialsToCSV()
+        saveSession(modeName: modeName)
+        exportTrialsToCSV(modeName: modeName)
         Task {
             await dismissImmersiveSpace()
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -943,7 +1078,7 @@ struct SimpleImmersiveView: View {
         }
     }
 
-    private func saveSession() {
+    private func saveSession(modeName: String = "Normal Test") {
         guard !trials.isEmpty else { return }
         let session = SimpleTestSession(
             id: UUID(),
@@ -952,10 +1087,11 @@ struct SimpleImmersiveView: View {
             totalTrials: clinicalGrid.count * brightnessLevels.count,
             hitCount: hitCount,
             missedCount: missedCount,
-            trials: trials
+            trials: trials,
+            modeName: modeName
         )
         SimpleSessionStore.append(session)
-        print("Session saved — \(trials.count) trials  Hits: \(hitCount)  Misses: \(missedCount)")
+        print("Session saved — \(trials.count) trials  Hits: \(hitCount)  Misses: \(missedCount)  Mode: \(modeName)")
     }
 
     private func printTestResults() {
@@ -970,7 +1106,7 @@ struct SimpleImmersiveView: View {
         print("---------------------------------")
     }
 
-    private func exportTrialsToCSV() {
+    private func exportTrialsToCSV(modeName: String = "Normal Test") {
         // Skip if no trials
         guard !trials.isEmpty else { return }
 
@@ -987,30 +1123,37 @@ struct SimpleImmersiveView: View {
             csv += "\(trialIndex),\(angleDeg),\(eccDeg),\(hit),\(rtSec),\(brightnessInt)\n"
         }
 
-        // Print full CSV to terminal
-        print("\n========== CSV OUTPUT ==========")
+        // Print full CSV to terminal (labelled by eye)
+        let eyeLabel = currentEye == .right ? "OD (Right Eye)" : "OS (Left Eye)"
+        print("\n========== CSV OUTPUT — \(eyeLabel) ==========")
         print(csv)
-        print("================================\n")
+        print("==============================================\n")
 
-        // Generate filename with timestamp
+        // Generate filename with timestamp — mode name included for easy identification
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyyMMdd_HHmmss"
         let timestamp = dateFormatter.string(from: Date())
-        let filename = "perimetry_\(timestamp).csv"
+        let eyeTag  = currentEye == .right ? "OD" : "OS"
+        let modeTag = modeName.replacingOccurrences(of: " ", with: "_")
+        let filename = "perimetry_\(modeTag)_\(eyeTag)_\(timestamp).csv"
 
-        // Get Documents directory
+        // Write file on a background thread so it never blocks the main thread
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let fileURL = documentsPath.appendingPathComponent(filename)
-
-        // Write CSV file
-        do {
-            try csv.write(to: fileURL, atomically: true, encoding: .utf8)
-            let fullPath = fileURL.path
-            print("CSV exported: \(fullPath)")
-            csvExportPath = fullPath
-        } catch {
-            print("CSV export failed: \(error.localizedDescription)")
-            csvExportPath = "Error: \(error.localizedDescription)"
+        Task.detached(priority: .background) {
+            do {
+                try csv.write(to: fileURL, atomically: true, encoding: .utf8)
+                let fullPath = fileURL.path
+                await MainActor.run {
+                    print("CSV exported: \(fullPath)")
+                    self.csvExportPath = fullPath
+                }
+            } catch {
+                await MainActor.run {
+                    print("CSV export failed: \(error.localizedDescription)")
+                    self.csvExportPath = "Error: \(error.localizedDescription)"
+                }
+            }
         }
     }
 }

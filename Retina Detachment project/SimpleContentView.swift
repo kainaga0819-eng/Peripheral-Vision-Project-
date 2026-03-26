@@ -7,8 +7,10 @@ struct SimpleContentView: View {
     @State private var showingResults = false
     @State private var showingSettings = false
     @State private var showingSimulation = false
+    @State private var showingMonocular = false
     @AppStorage("simulationModeEnabled") private var simulationModeEnabled = false
-    @AppStorage("simulationProfileRaw") private var simulationProfileRaw: String = VisionProfile.normal.rawValue
+    @AppStorage("simulationSeverityRaw") private var simulationSeverityRaw: String = DetachmentSeverity.mild.rawValue
+    @AppStorage("monocularModeEnabled") private var monocularModeEnabled = false
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @Environment(\.dismissWindow) private var dismissWindow
@@ -58,6 +60,16 @@ struct SimpleContentView: View {
 
             VStack(spacing: 15) {
                 Button {
+                    showingMonocular = true
+                } label: {
+                    Label("Monocular Testing", systemImage: "eye.trianglebadge.exclamationmark")
+                }
+                .padding()
+                .background(Color.teal)
+                .foregroundColor(.white)
+                .cornerRadius(10)
+
+                Button {
                     showingSimulation = true
                 } label: {
                     Label("Simulation Mode", systemImage: "person.fill.checkmark")
@@ -95,10 +107,17 @@ struct SimpleContentView: View {
             MenuSettingsSheet()
         }
         .sheet(isPresented: $showingSimulation) {
-            SimulationSetupSheet { profile in
-                simulationProfileRaw = profile.rawValue
+            SimulationSetupSheet { severity in
+                simulationSeverityRaw = severity.rawValue
                 simulationModeEnabled = true
                 showingSimulation = false
+                handleTap()
+            }
+        }
+        .sheet(isPresented: $showingMonocular) {
+            MonocularSetupSheet {
+                monocularModeEnabled = true
+                showingMonocular = false
                 handleTap()
             }
         }
@@ -166,38 +185,39 @@ struct MenuSettingsSheet: View {
 // MARK: - Simulation Setup Sheet
 
 struct SimulationSetupSheet: View {
-    let onStart: (VisionProfile) -> Void
-    @State private var selectedProfile: VisionProfile = .normal
+    let onStart: (DetachmentSeverity) -> Void
+    @State private var selectedSeverity: DetachmentSeverity = .mild
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    ForEach(VisionProfile.allCases) { profile in
+                    ForEach(DetachmentSeverity.allCases) { severity in
                         Button {
-                            selectedProfile = profile
+                            selectedSeverity = severity
                         } label: {
                             HStack(spacing: 14) {
-                                Image(systemName: profile.icon)
+                                Image(systemName: severity.icon)
                                     .font(.title3)
-                                    .foregroundColor(selectedProfile == profile ? .purple : .secondary)
+                                    .foregroundColor(selectedSeverity == severity
+                                                     ? severity.color : .secondary)
                                     .frame(width: 28)
 
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(profile.rawValue)
-                                        .fontWeight(selectedProfile == profile ? .semibold : .regular)
+                                    Text(severity.rawValue)
+                                        .fontWeight(selectedSeverity == severity ? .semibold : .regular)
                                         .foregroundColor(.primary)
-                                    Text(profile.description)
+                                    Text(severity.description)
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
 
                                 Spacer()
 
-                                if selectedProfile == profile {
+                                if selectedSeverity == severity {
                                     Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(.purple)
+                                        .foregroundColor(severity.color)
                                 }
                             }
                             .contentShape(Rectangle())
@@ -205,25 +225,127 @@ struct SimulationSetupSheet: View {
                         .buttonStyle(.plain)
                     }
                 } header: {
-                    Text("Select Vision Profile")
+                    Text("Detachment Severity")
                 } footer: {
-                    Text("The app will automatically run all 228 trials as a simulated patient with this profile. ~10 random mistakes will be injected to mimic human error.")
+                    Text("A retinal detachment zone is procedurally generated from a random angle and eccentricity range matching the chosen severity. ~10 random misclicks mimic human error.")
                 }
 
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("How it works", systemImage: "waveform.path.ecg.rectangle")
+                            .font(.subheadline).fontWeight(.semibold)
+                        Text("A random polar angle (0°–360°) is chosen as the detachment origin. A blind sector of matching size is generated around that angle. Any stimulus falling inside the sector will be missed; healthy-field stimuli follow normal detection probability.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                }
             }
-            .navigationTitle("Simulation Mode")
+            .navigationTitle("Dynamic Simulation")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Start Simulation") {
-                        onStart(selectedProfile)
+                    Button("Generate & Start") {
+                        onStart(selectedSeverity)
                     }
                     .fontWeight(.semibold)
-                    .foregroundColor(.purple)
+                    .foregroundColor(selectedSeverity.color)
                 }
+            }
+        }
+    }
+}
+
+// MARK: - Monocular Setup Sheet
+
+struct MonocularSetupSheet: View {
+    let onStart: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+
+                    // Overview card
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("How it works", systemImage: "info.circle.fill")
+                            .font(.title3).fontWeight(.semibold)
+                            .foregroundColor(.teal)
+
+                        Text("Monocular mode tests each eye independently using the full 76-point Humphrey 30-2 grid (228 trials per eye).")
+                            .font(.body)
+
+                        Text("Two separate CSV files are exported at the end — one for each eye.")
+                            .font(.body)
+                    }
+                    .padding()
+                    .background(.quaternary)
+                    .cornerRadius(14)
+
+                    // Step-by-step instructions
+                    VStack(alignment: .leading, spacing: 16) {
+                        Label("Instructions", systemImage: "list.number")
+                            .font(.title3).fontWeight(.semibold)
+
+                        StepRow(number: "1", title: "Right eye first (OD)",
+                                detail: "Cover your LEFT eye completely with your hand or an eye patch.")
+                        StepRow(number: "2", title: "Complete the test",
+                                detail: "Look at the fixation dot and tap the button (or say \"I see it\") whenever you spot a white dot in your peripheral vision.")
+                        StepRow(number: "3", title: "Switch eyes",
+                                detail: "An overlay will appear prompting you to cover your RIGHT eye before the left-eye test begins.")
+                        StepRow(number: "4", title: "Left eye (OS)",
+                                detail: "Repeat the same test with your left eye while the right eye is covered.")
+                        StepRow(number: "5", title: "Results",
+                                detail: "Two CSV files are saved — perimetry_OD_... and perimetry_OS_... — and printed to the Xcode console.")
+                    }
+                    .padding()
+                    .background(.quaternary)
+                    .cornerRadius(14)
+                }
+                .padding()
+            }
+            .navigationTitle("Monocular Testing")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Start — Right Eye") {
+                        onStart()
+                    }
+                    .fontWeight(.semibold)
+                    .foregroundColor(.teal)
+                }
+            }
+        }
+    }
+}
+
+private struct StepRow: View {
+    let number: String
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text(number)
+                .font(.headline)
+                .foregroundColor(.white)
+                .frame(width: 28, height: 28)
+                .background(Color.teal)
+                .clipShape(Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .fontWeight(.semibold)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
         }
     }
