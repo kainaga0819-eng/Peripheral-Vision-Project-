@@ -152,6 +152,7 @@ struct StimulusTrial: Identifiable, Codable {
     let timedOut: Bool
     let brightnessValue: Float      // Actual brightness (0.25, 0.60, 1.00)
     let brightnessLevelIndex: Int   // Index into brightnessLevels array (0=Low, 1=Medium, 2=High)
+    var testNumber: Int = 1         // Which run in a multi-run session
 
     init(trialID: Int, spotID: Int, angleDegrees: Float, eccentricityDegrees: Float,
          spawnTime: Date, responseTime: Date?, wasHit: Bool, timedOut: Bool,
@@ -180,7 +181,8 @@ struct SimpleTestSession: Codable, Identifiable {
     let hitCount: Int
     let missedCount: Int
     let trials: [StimulusTrial]
-    var modeName: String = "Normal Test"  // default keeps old saved sessions decodable
+    var modeName: String = "Normal Test"   // default keeps old saved sessions decodable
+    var totalTestRuns: Int = 1             // how many sequential runs were combined
 
     var accuracy: Double {
         guard completedTrials > 0 else { return 0 }
@@ -238,6 +240,9 @@ struct SimpleImmersiveView: View {
     @AppStorage("voiceControlEnabled") private var voiceControlEnabled = false
     @AppStorage("simulationModeEnabled") private var simulationModeEnabled = false
     @AppStorage("simulationSeverityRaw") private var simulationSeverityRaw = DetachmentSeverity.mild.rawValue
+    @AppStorage("simulationRepeatCount") private var simulationRepeatCount: Int = 1
+    @State private var currentTestRun: Int = 1
+    @State private var allRunTrials: [StimulusTrial] = []
     @State private var detachmentZone: DetachmentZone? = nil
     @AppStorage("monocularModeEnabled") private var monocularModeEnabled = false
     @State private var showEyeSwitchOverlay = false
@@ -468,12 +473,26 @@ struct SimpleImmersiveView: View {
                                 showSettingsPanel = false
                                 fastForwardSimulation()
                             } label: {
-                                Label("Fast Forward — Complete Now", systemImage: "forward.end.fill")
+                                Label("Fast Forward — Skip This Run", systemImage: "forward.fill")
                                     .font(.headline).foregroundColor(.white)
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 13)
                                     .background(.purple)
                                     .cornerRadius(13)
+                            }
+
+                            if simulationRepeatCount > 1 {
+                                Button {
+                                    showSettingsPanel = false
+                                    fastForwardAllSimulation()
+                                } label: {
+                                    Label("Skip All \(simulationRepeatCount) Tests", systemImage: "forward.end.fill")
+                                        .font(.headline).foregroundColor(.white)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 13)
+                                        .background(.indigo)
+                                        .cornerRadius(13)
+                                }
                             }
                         }
 
@@ -971,6 +990,105 @@ struct SimpleImmersiveView: View {
         completeTest()
     }
 
+    // MARK: - Skip all remaining simulation runs at once
+
+    private func fastForwardAllSimulation() {
+        guard simulationModeEnabled else { return }
+
+        // Stop the live test loop
+        testActive = false
+        currentStimulus?.removeFromParent()
+        currentStimulus = nil
+        currentSpawnTime = nil
+
+        let severity = DetachmentSeverity(rawValue: simulationSeverityRaw) ?? .mild
+
+        // Complete the current run first (same as fastForwardSimulation but without calling completeTest)
+        let currentZone = detachmentZone
+        for scheduled in scheduledTrials {
+            let loc = scheduled.location
+            recordSimulatedTrial(zone: currentZone, severity: severity, trialID: currentTrialID,
+                                 angleDeg: loc.angleDegrees,
+                                 eccentricityDeg: loc.eccentricityDegrees,
+                                 brightness: scheduled.brightnessValue,
+                                 brightnessIndex: scheduled.brightnessLevelIndex)
+            currentTrialID += 1
+        }
+        scheduledTrials = []
+
+        // Tag and accumulate current run
+        let runNum = currentTestRun
+        let tagged = trials.map { t -> StimulusTrial in var t2 = t; t2.testNumber = runNum; return t2 }
+        allRunTrials.append(contentsOf: tagged)
+
+        // Now fast-forward all remaining runs
+        var runIndex = currentTestRun + 1
+        while runIndex <= simulationRepeatCount {
+            let zone = severity.generate()
+            var runTrials: [StimulusTrial] = []
+            var runHits = 0
+            var runTrialID = 0
+
+            var all: [ScheduledTrial] = []
+            for loc in clinicalGrid {
+                for (i, b) in brightnessLevels.enumerated() {
+                    all.append(ScheduledTrial(location: loc, brightnessValue: b, brightnessLevelIndex: i))
+                }
+            }
+
+            for scheduled in all {
+                let loc = scheduled.location
+                let angleRad = loc.angleDegrees * Float.pi / 180.0
+                let xDeg = cos(angleRad) * loc.eccentricityDegrees
+                let yDeg = sin(angleRad) * loc.eccentricityDegrees
+                let sens = zone?.sensitivity(xDeg: xDeg, yDeg: yDeg, brightness: scheduled.brightnessValue)
+                         ?? DetachmentZone.healthySensitivity(xDeg: xDeg, yDeg: yDeg, brightness: scheduled.brightnessValue)
+                let isMistake = Double.random(in: 0...1) < (10.0 / 228.0)
+                let wasHit = isMistake ? (Double.random(in: 0...1) > sens) : (Double.random(in: 0...1) < sens)
+                let spawnTime = Date()
+                let rt = wasHit ? severity.reactionTime(eccentricityDeg: loc.eccentricityDegrees, brightness: scheduled.brightnessValue) : nil
+
+                var trial = StimulusTrial(
+                    trialID: runTrialID, spotID: runTrialID,
+                    angleDegrees: loc.angleDegrees,
+                    eccentricityDegrees: loc.eccentricityDegrees,
+                    spawnTime: spawnTime,
+                    responseTime: wasHit ? spawnTime.addingTimeInterval(rt!) : nil,
+                    wasHit: wasHit, timedOut: !wasHit,
+                    brightnessValue: scheduled.brightnessValue,
+                    brightnessLevelIndex: scheduled.brightnessLevelIndex
+                )
+                trial.testNumber = runIndex
+                runTrials.append(trial)
+                if wasHit { runHits += 1 }
+                runTrialID += 1
+            }
+
+            allRunTrials.append(contentsOf: runTrials)
+            runIndex += 1
+        }
+
+        // Replace trials with everything accumulated
+        trials = allRunTrials
+        monocularModeEnabled = false
+
+        let modeName = DetachmentSeverity(rawValue: simulationSeverityRaw)?.rawValue ?? simulationSeverityRaw
+        simulationModeEnabled = false
+        saveSession(modeName: modeName, totalTestRuns: simulationRepeatCount)
+        exportTrialsToCSV(modeName: modeName)
+
+        allRunTrials = []
+        currentTestRun = 1
+
+        print("Skip all complete — \(trials.count) total trials across \(simulationRepeatCount) runs")
+
+        Task {
+            await dismissImmersiveSpace()
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            openWindow(id: "MainWindow")
+        }
+    }
+
     private func recordSimulatedTrial(zone: DetachmentZone?, severity: DetachmentSeverity,
                                       trialID: Int, angleDeg: Float, eccentricityDeg: Float,
                                       brightness: Float, brightnessIndex: Int) {
@@ -1028,13 +1146,60 @@ struct SimpleImmersiveView: View {
 
         // Simulation is always single-eye — clear monocular flag before it can trigger eye switching
         if simulationModeEnabled { monocularModeEnabled = false }
-        let modeName = simulationModeEnabled
+
+        let wasSimulation = simulationModeEnabled
+        let modeName = wasSimulation
             ? (DetachmentSeverity(rawValue: simulationSeverityRaw)?.rawValue ?? simulationSeverityRaw)
             : "Normal Test"
-        simulationModeEnabled = false
 
-        saveSession(modeName: modeName)
+        // Tag current run's trials with their run number and accumulate
+        if wasSimulation {
+            let runNum = currentTestRun
+            let tagged = trials.map { t -> StimulusTrial in
+                var t2 = t; t2.testNumber = runNum; return t2
+            }
+            allRunTrials.append(contentsOf: tagged)
+
+            // If more runs remain, start the next one immediately
+            if currentTestRun < simulationRepeatCount {
+                currentTestRun += 1
+                trials.removeAll()
+                hitCount = 0; missedCount = 0; currentTrialID = 0
+
+                let severity = DetachmentSeverity(rawValue: simulationSeverityRaw) ?? .mild
+                let zone = severity.generate()
+                detachmentZone = zone
+                if let z = zone {
+                    print("Run \(currentTestRun)/\(simulationRepeatCount) — new zone:")
+                    print(z.locationDescription)
+                } else {
+                    print("Run \(currentTestRun)/\(simulationRepeatCount) — Normal Vision")
+                }
+
+                var all: [ScheduledTrial] = []
+                for loc in clinicalGrid {
+                    for (i, b) in brightnessLevels.enumerated() {
+                        all.append(ScheduledTrial(location: loc, brightnessValue: b, brightnessLevelIndex: i))
+                    }
+                }
+                scheduledTrials = all.shuffled()
+                testActive = true
+                scheduleNextStimulus()
+                return  // don't dismiss — more runs pending
+            }
+
+            // All runs complete — use the full accumulated set for saving
+            trials = allRunTrials
+        }
+
+        simulationModeEnabled = false
+        let totalRuns = wasSimulation ? simulationRepeatCount : 1
+        saveSession(modeName: modeName, totalTestRuns: totalRuns)
         exportTrialsToCSV(modeName: modeName)
+
+        // Reset multi-run state
+        allRunTrials = []
+        currentTestRun = 1
 
         if currentEye == .right && monocularModeEnabled {
             // Right eye (OD) done — prepare left eye (OS) (monocular only)
@@ -1065,12 +1230,29 @@ struct SimpleImmersiveView: View {
 
     private func leaveTest() {
         testActive = false
-        let modeName = simulationModeEnabled
+        let wasSimulation = simulationModeEnabled
+        let modeName = wasSimulation
             ? (DetachmentSeverity(rawValue: simulationSeverityRaw)?.rawValue ?? simulationSeverityRaw)
             : "Normal Test"
+
+        // Save whatever runs have completed plus any partial current run
+        if wasSimulation {
+            let runNum = currentTestRun
+            let tagged = trials.map { t -> StimulusTrial in
+                var t2 = t; t2.testNumber = runNum; return t2
+            }
+            allRunTrials.append(contentsOf: tagged)
+            trials = allRunTrials
+        }
+
         simulationModeEnabled = false
-        saveSession(modeName: modeName)
+        let totalRuns = wasSimulation ? currentTestRun : 1
+        saveSession(modeName: modeName, totalTestRuns: totalRuns)
         exportTrialsToCSV(modeName: modeName)
+
+        allRunTrials = []
+        currentTestRun = 1
+
         Task {
             await dismissImmersiveSpace()
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -1078,20 +1260,23 @@ struct SimpleImmersiveView: View {
         }
     }
 
-    private func saveSession(modeName: String = "Normal Test") {
+    private func saveSession(modeName: String = "Normal Test", totalTestRuns: Int = 1) {
         guard !trials.isEmpty else { return }
+        let hits   = trials.filter { $0.wasHit }.count
+        let misses = trials.filter { !$0.wasHit }.count
         let session = SimpleTestSession(
             id: UUID(),
             date: Date(),
             completedTrials: trials.count,
-            totalTrials: clinicalGrid.count * brightnessLevels.count,
-            hitCount: hitCount,
-            missedCount: missedCount,
+            totalTrials: clinicalGrid.count * brightnessLevels.count * totalTestRuns,
+            hitCount: hits,
+            missedCount: misses,
             trials: trials,
-            modeName: modeName
+            modeName: modeName,
+            totalTestRuns: totalTestRuns
         )
         SimpleSessionStore.append(session)
-        print("Session saved — \(trials.count) trials  Hits: \(hitCount)  Misses: \(missedCount)  Mode: \(modeName)")
+        print("Session saved — \(trials.count) trials across \(totalTestRuns) run(s)  Mode: \(modeName)")
     }
 
     private func printTestResults() {
@@ -1111,16 +1296,17 @@ struct SimpleImmersiveView: View {
         guard !trials.isEmpty else { return }
 
         // Create CSV content with brightness as int (1=least bright, 2=medium, 3=brightest)
-        var csv = "trial_index,angle_deg,ecc_deg,hit,reaction_time_sec,brightness_value\n"
+        var csv = "test_number,trial_index,angle_deg,ecc_deg,hit,reaction_time_sec,brightness_value\n"
 
         for trial in trials {
+            let testNum    = trial.testNumber
             let trialIndex = trial.trialID
-            let angleDeg = String(format: "%.1f", trial.angleDegrees)
-            let eccDeg = String(format: "%.1f", trial.eccentricityDegrees)
-            let hit = trial.wasHit ? "true" : "false"
-            let rtSec = trial.reactionTimeSeconds.map { String(format: "%.3f", $0) } ?? "-1.0"
-            let brightnessInt = trial.brightnessLevelIndex + 1
-            csv += "\(trialIndex),\(angleDeg),\(eccDeg),\(hit),\(rtSec),\(brightnessInt)\n"
+            let angleDeg   = String(format: "%.1f", trial.angleDegrees)
+            let eccDeg     = String(format: "%.1f", trial.eccentricityDegrees)
+            let hit        = trial.wasHit ? "true" : "false"
+            let rtSec      = trial.reactionTimeSeconds.map { String(format: "%.3f", $0) } ?? "-1.0"
+            let brightness = trial.brightnessLevelIndex + 1
+            csv += "\(testNum),\(trialIndex),\(angleDeg),\(eccDeg),\(hit),\(rtSec),\(brightness)\n"
         }
 
         // Print full CSV to terminal (labelled by eye)

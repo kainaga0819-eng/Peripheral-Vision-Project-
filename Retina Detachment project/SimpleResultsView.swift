@@ -191,11 +191,11 @@ struct SessionDetailSheet: View {
 
     // Builds the CSV once on appear, off the main thread
     private func buildCSV() async -> URL {
-        var csv = "trial_index,angle_deg,ecc_deg,hit,reaction_time_sec,brightness_value\n"
+        var csv = "test_number,trial_index,angle_deg,ecc_deg,hit,reaction_time_sec,brightness_value\n"
         for trial in session.trials {
             let hit = trial.wasHit ? "true" : "false"
             let rt  = trial.reactionTimeSeconds.map { String(format: "%.3f", $0) } ?? "-1.0"
-            csv += "\(trial.trialID),\(String(format: "%.1f", trial.angleDegrees)),\(String(format: "%.1f", trial.eccentricityDegrees)),\(hit),\(rt),\(trial.brightnessLevelIndex + 1)\n"
+            csv += "\(trial.testNumber),\(trial.trialID),\(String(format: "%.1f", trial.angleDegrees)),\(String(format: "%.1f", trial.eccentricityDegrees)),\(hit),\(rt),\(trial.brightnessLevelIndex + 1)\n"
         }
         let df = DateFormatter()
         df.dateFormat = "yyyyMMdd_HHmmss"
@@ -222,6 +222,11 @@ struct SessionDetailSheet: View {
                         ResultStatCard(label: "Trials",
                                  value: "\(session.completedTrials)/\(session.totalTrials)",
                                  color: .purple)
+                        ResultStatCard(
+                            label: session.totalTestRuns == 1 ? "Test Runs" : "Test Runs",
+                            value: "\(session.totalTestRuns)",
+                            color: session.totalTestRuns > 1 ? .green : .gray)
+                        ResultStatCard(label: "Mode", value: session.modeName, color: .teal)
                     }
 
                     // Accuracy by eccentricity

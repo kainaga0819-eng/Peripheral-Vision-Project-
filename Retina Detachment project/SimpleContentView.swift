@@ -10,6 +10,7 @@ struct SimpleContentView: View {
     @State private var showingMonocular = false
     @AppStorage("simulationModeEnabled") private var simulationModeEnabled = false
     @AppStorage("simulationSeverityRaw") private var simulationSeverityRaw: String = DetachmentSeverity.mild.rawValue
+    @AppStorage("simulationRepeatCount") private var simulationRepeatCount: Int = 1
     @AppStorage("monocularModeEnabled") private var monocularModeEnabled = false
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
@@ -107,8 +108,9 @@ struct SimpleContentView: View {
             MenuSettingsSheet()
         }
         .sheet(isPresented: $showingSimulation) {
-            SimulationSetupSheet { severity in
+            SimulationSetupSheet { severity, repeatCount in
                 simulationSeverityRaw = severity.rawValue
+                simulationRepeatCount = repeatCount
                 simulationModeEnabled = true
                 showingSimulation = false
                 handleTap()
@@ -185,8 +187,9 @@ struct MenuSettingsSheet: View {
 // MARK: - Simulation Setup Sheet
 
 struct SimulationSetupSheet: View {
-    let onStart: (DetachmentSeverity) -> Void
+    let onStart: (DetachmentSeverity, Int) -> Void
     @State private var selectedSeverity: DetachmentSeverity = .mild
+    @State private var customRunCount: Int = 5
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -240,19 +243,71 @@ struct SimulationSetupSheet: View {
                     }
                     .padding(.vertical, 4)
                 }
+
+                Section {
+                    Button {
+                        onStart(selectedSeverity, 1)
+                    } label: {
+                        HStack {
+                            Image(systemName: "play.circle.fill")
+                                .foregroundColor(selectedSeverity.color)
+                            Text("Run 1 Test")
+                                .fontWeight(.semibold)
+                            Spacer()
+                            Text("228 trials")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        onStart(selectedSeverity, 10)
+                    } label: {
+                        HStack {
+                            Image(systemName: "play.circle.fill")
+                                .foregroundColor(selectedSeverity.color)
+                            Text("Run 10 Tests")
+                                .fontWeight(.semibold)
+                            Spacer()
+                            Text("2,280 trials · 1 CSV")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    HStack {
+                        Image(systemName: "slider.horizontal.3")
+                            .foregroundColor(selectedSeverity.color)
+                        Text("Custom")
+                            .fontWeight(.semibold)
+                        Spacer()
+                        Stepper("\(customRunCount) tests", value: $customRunCount, in: 2...50)
+                            .labelsHidden()
+                        Text("\(customRunCount)")
+                            .font(.subheadline).monospacedDigit()
+                            .frame(width: 28, alignment: .trailing)
+                        Button {
+                            onStart(selectedSeverity, customRunCount)
+                        } label: {
+                            Image(systemName: "play.circle.fill")
+                                .font(.title2)
+                                .foregroundColor(selectedSeverity.color)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    Text("How Many Runs?")
+                } footer: {
+                    Text("10 Tests (or a custom amount) runs the same simulation back-to-back with a fresh detachment zone each time, then combines everything into one CSV file.")
+                }
             }
             .navigationTitle("Dynamic Simulation")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Generate & Start") {
-                        onStart(selectedSeverity)
-                    }
-                    .fontWeight(.semibold)
-                    .foregroundColor(selectedSeverity.color)
                 }
             }
         }
